@@ -1,0 +1,11 @@
+formula_id: proxy_mismatch
+version: "1.0"
+components:
+  definition_mismatch: 20
+  population_mismatch: 15
+  geography_mismatch: 15
+  time_window_mismatch: 10
+  unit_denominator_mismatch: 15
+  measurement_method_mismatch: 10
+  aggregation_level_mismatch: 15
+unknown_policy: omit_score

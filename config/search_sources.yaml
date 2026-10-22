@@ -1,0 +1,4 @@
+providers:
+  crossref: {enabled: true, endpoint: "https://api.crossref.org/works", rate_limit_seconds: 1}
+  openalex: {enabled: true, endpoint: "https://api.openalex.org/works", rate_limit_seconds: 1}
+official_catalogs: []

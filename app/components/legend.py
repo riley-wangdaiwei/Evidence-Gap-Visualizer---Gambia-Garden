@@ -1,0 +1,4 @@
+import streamlit as st
+def render(view):
+    st.markdown("**Legend** · teal = lower documented problem · amber = medium · rust = greater gap/mismatch · grey + UNKNOWN label = not assessed")
+    st.caption(("Arrow direction, if enabled: evidence/comparator → target gap." if view=="gap" else "Arrow direction, if enabled: observed variable/series → target indicator.")+" This matrix prototype draws no arrows. A future arrow width must encode documented independent-source support; line length carries no evidence meaning. Wind is modeled and disabled: this registry has no documented directional links or map coordinates. Friction denotes a typed evidence/access barrier; interactive friction details are not implemented. Observation levels are country / region / household / person / institution; level is never inferred from a national value.")

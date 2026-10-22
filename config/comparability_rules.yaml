@@ -1,0 +1,3 @@
+unknown_policy: keep_unknown
+direct_match_requires: [definition, population, geography, time_period, unit, denominator, method, aggregation_level]
+classes: [DIRECT_MATCH, HARMONIZABLE, PROXY, CONCEPTUALLY_RELATED, INCOMPATIBLE, UNKNOWN_REQUIRES_REVIEW]

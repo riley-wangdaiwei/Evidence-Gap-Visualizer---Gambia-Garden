@@ -1,0 +1,14 @@
+# Python virtual environment and generated files
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.egg-info/
+.env
+
+# Restricted source imports; keep only the directory placeholder
+data/imports/*
+!data/imports/.gitkeep
+
+# Local SQLite registry and its sidecar files
+data/registry.sqlite*
