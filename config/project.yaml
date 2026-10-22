@@ -1,5 +1,6 @@
-project_id: gambia-savings-demo
+project_id: gambia-youth-drug-prevention
 country: The Gambia
-target_question: "What evidence measures savings activity, account ownership, and savings balances?"
+target_question: "What evidence measures youth drug use and prevention, treatment, livelihoods, and related research claims?"
+default_batch_dir: data/youth
 search_scope: {publication_year_from: 2000, publication_year_to: 2026, geography: national}
 providers: [crossref, openalex]

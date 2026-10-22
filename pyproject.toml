@@ -7,7 +7,7 @@ name = "gambia-evidence-gap-explorer"
 version = "0.1.0"
 description = "Auditable evidence gap and indicator alignment explorer"
 requires-python = ">=3.10"
-dependencies = ["pydantic>=2.6", "pandas>=2.0", "PyYAML>=6", "plotly>=5.18", "streamlit>=1.32", "PyMuPDF>=1.23", "networkx>=3"]
+dependencies = ["pydantic>=2.6", "pandas>=2.0", "PyYAML>=6", "plotly>=5.18", "streamlit>=1.35", "PyMuPDF>=1.23", "networkx>=3"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

@@ -2,6 +2,8 @@ import sys
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"src"))
 import streamlit as st
+from evidence_gap.database import connect
+from evidence_gap.batch_loader import load_configured_batch
 st.set_page_config(page_title="Gambia Evidence Gap Explorer",layout="wide")
 st.markdown("""<style>
 .stApp{background:#050505;color:#fff}
@@ -15,10 +17,15 @@ section[data-testid="stSidebar"]{background:#050505;border-right:1px solid #777}
 .stButton>button:hover{background:#050505;color:#fff;border-bottom-color:#fff}
 input,textarea{background:#111!important;color:#fff!important;border:0!important;border-bottom:1px solid #777!important;border-radius:0!important}
 input:focus,textarea:focus{border-bottom:2px solid #fff!important;box-shadow:none!important}
+[data-baseweb="select"]>div{background:#111!important;color:#fff!important;border:0!important;border-bottom:1px solid #777!important;border-radius:0!important}
+[data-testid="stAlert"]{background:#080808!important;border:0!important;border-left:1px solid #888!important;border-radius:0!important;color:#fff!important}
+[data-testid="stVerticalBlockBorderWrapper"],[data-testid="stExpander"]{border-radius:0!important;box-shadow:none!important}
+div[data-testid="stDataFrame"]{border-radius:0!important}
 div[data-testid="stRadio"] label{color:#777}
 div[data-testid="stRadio"] label:has(input:checked){color:#fff;font-weight:700}
 div[data-testid="stRadio"] label>div:first-child{display:none}
 </style>""",unsafe_allow_html=True)
+batch=load_configured_batch(connect())
 from pages import evidence_gap_map,proxy_alignment_map,source_registry,formula_settings,research_tasks
 PAGES={"Overview":None,"Evidence gap map":evidence_gap_map,"Proxy alignment map":proxy_alignment_map,"Source registry":source_registry,"Formula settings":formula_settings,"Research tasks":research_tasks}
 with st.sidebar:
@@ -31,7 +38,10 @@ if page=="Overview":
     st.markdown("A local instrument for examining what is measured, what is missing, and what research step may follow.")
     st.markdown("---")
     st.caption("MVP / LOCAL REGISTRY / NO LLM KEY REQUIRED")
-    st.info("Bundled examples are SYNTHETIC. They are not findings about The Gambia.")
+    if batch["files"]:
+        st.info(f"Configured batch: {batch['folder']} · {batch['files']} CSV file(s) · {batch['queued']} new candidate bundle(s), pending human review.")
+    else:
+        st.info(f"Configured batch folder is empty: {batch['folder']}. Evidence remains unknown until reviewed source records are supplied.")
     st.markdown("### Method")
     st.markdown("One canonical registry feeds both matrix views. Provenance and original measurement definitions remain attached. A national statistic stays national. Unknown is never zero.")
 else: PAGES[page].render()

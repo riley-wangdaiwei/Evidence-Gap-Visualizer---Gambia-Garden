@@ -4,7 +4,7 @@ from evidence_gap.task_builder import build_task,export_markdown
 
 def test_search_result_schema_keeps_candidate_out_of_formal_sources():
     db=connect(":memory:")
-    db.execute("INSERT INTO search_runs VALUES('run','crossref','query','2026-10-22','complete',1,'test')")
+    db.execute("INSERT INTO search_runs(id,provider,query,started_at,status,result_count,details) VALUES('run','crossref','query','2026-10-22','complete',1,'test')")
     db.execute("INSERT INTO search_candidates(id,search_run_id,title,review_status) VALUES('candidate','run','Example','PENDING_HUMAN_REVIEW')")
     assert db.execute("SELECT count(*) FROM sources").fetchone()[0]==0
     assert db.execute("SELECT review_status FROM search_candidates").fetchone()[0]=="PENDING_HUMAN_REVIEW"

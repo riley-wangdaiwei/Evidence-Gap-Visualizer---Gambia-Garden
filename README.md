@@ -1,114 +1,83 @@
 # Gambia Evidence Gap Explorer
 
-A local Streamlit prototype for recording research sources and comparing measurement concepts. It stores sources, data products, indicators, variables, observations, gap claims, alignments, barriers, searches and formula configurations in a shared SQLite registry. **The present heatmap cells are not yet generated from one shared batch of approved evidence records**; see the acceptance audit below. All bundled measurement fixtures and target concepts are marked **SYNTHETIC** and are not findings about The Gambia. The app does not require an LLM key.
+A local Streamlit evidence registry and paired matrix views for the configured youth drug prevention research scope. The application does not contain a youth evidence batch yet. It starts with configured topics and explicit `NOT_SEARCHED_OR_UNKNOWN` cells; it does not fall back to a savings example or manufacture observations. No LLM key is required because LLM extraction is **not implemented**.
 
-## Setup and verification (Windows PowerShell)
+## Install, validate, rebuild, test, then launch (Windows PowerShell)
 
-Run these commands in order from the repository root. In this Windows session, bare `python.exe` could not launch before the virtual environment existed, so the venv was created with `& 'C:\Users\Dell\.local\bin\python3.14.exe' -m venv .venv`. After activation, `python` resolved to `.venv\Scripts\python.exe` normally. If your PATH `python` works, use the first command below; otherwise use the local Python executable above.
+Run from the repository root. First place only a permitted source-linked CSV bundle supplied by the research team in `data/youth/`; this repository intentionally ships no youth research/test dataset.
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e ".[dev]"
-python scripts/validate_data.py --input data/demo/example.csv
+$batchFile = "data/youth/<provided-bundle>.csv"
+python scripts/validate_data.py --input $batchFile
+python scripts/import_records.py --input $batchFile
 python scripts/rebuild_tensor.py
-pytest -q
-streamlit run app/app.py
+python -m pytest -q
+python -m streamlit run app/app.py
 ```
 
-`validate_data.py` reports valid candidate rows. To write those rows as source records, pass `--import-valid`; this currently creates source records directly and does not create linked data products or put them in a review queue. `rebuild_tensor.py` regenerates `data/tensor.json` from saved alignments. The Streamlit prototype has Overview plus five functional navigation pages: Evidence gap map, Proxy alignment map, Source registry, Formula settings, and Research tasks.
+`requirements.txt` lists the runtime dependencies from `pyproject.toml`; for deployments that install requirements directly, use `python -m pip install -r requirements.txt`. An optional LLM key is neither read nor required. The CSV importer only places complete bundles in the pending review queue. A reviewer must inspect and approve a bundle in **Source registry** before it can contribute to either matrix.
 
-## Pages and current behavior
+CSV columns are `source_id`, `source_title`, `source_url_or_doi`, `retrieved_at` (ISO date), `bundle_json`, and optional `synthetic`. `bundle_json` is a JSON object containing linked arrays named `sources`, `data_products`, `indicators`, `variables`, `observations`, `alignments`, `gap_claims`, `barriers`, `research_claims`, `claim_requirements`, and/or `macro_series`. See the **Download CSV header** control for an empty header; it contains no chosen or example research data. For validation only, omit `--import-valid`; `scripts/import_records.py` queues candidates and never approves them.
 
-- **Evidence gap map** — matrix with target indicators on Y and population groups on X; cells stay `NOT_SEARCHED_OR_UNKNOWN` until scope and evidence are reviewed. Geography and observation-period filters are disabled because no geocoded observations or scoped measurements are present. There is no polygon map yet.
-- **Proxy alignment map** — target concepts on Y and observed measures on X when a saved alignment exists. The bundled account-count, account-holder, and previous-12-month-savings concepts are distinct synthetic catalog fixtures. With no saved alignment rows, the matrix is empty and explicitly says relationships are unknown; the UI does not invent a cross-product of pairings.
-- **Source registry** — lists formal sources separately from search candidates pending human review. Stable IDs, DOI/URL and search-run IDs provide basic provenance. DOI/URL/title duplicates are collapsed by the search adapter before insertion; the interface does not show suppressed-duplicate counts or source-lineage decisions.
-- **Formula settings** — edits weights and allows saving a named formula version only when weights sum to 100% and a rationale is supplied. A missing component remains `None` in formula calculations. Saved settings are in SQLite; formula-run snapshots are not yet wired to the interface.
-- **Research tasks** — creates draft tasks and offers Markdown and JSON downloads.
+## Pages
 
-The Overview is a sixth navigation item, separate from the five work pages.
+There are six navigation items, including five work pages:
 
-Edit `config/project.yaml` for project scope and providers, `config/taxonomy.yaml` for controlled terms, `config/comparability_rules.yaml` for comparisons, and `config/measures.yaml` for formula defaults. `data/imports/` is local staging and ignored by Git. Check source terms and access permissions before storing or sharing imported material; see `docs/access_ethics.md`.
+- **Overview** — configured project, batch-folder and review-first status.
+- **Evidence gap map** — View A; configured target topics by supported geographic unit, with population, observation-period, and source filters. Select a target and geography for its evidence/provenance detail.
+- **Proxy / indicator alignment** — View B; approved target measures by observed indicator/variable, with relationship class, rationale, and measurement loss. Its Claim Audit reads reviewed claims and variable requirements from the registry.
+- **Source registry** — source-linked CSV/manual candidates, metadata search candidates, review status, deduplication/lineage information, and approved macro-series metadata.
+- **Formula settings** — versioned weights, nullable component values, score display, and persisted formula-run snapshots.
+- **Research tasks** — draft task creation with Markdown and JSON downloads.
 
-## Matrix semantics and statuses
+## Matrix axes and geography guard
 
-The intended View A matrix axes follow the spec: X = population group; Y = evidence domain/target indicator. Geographic mode must use only observations at their recorded level. A national observation must never be copied into a region or district. Geographic mode is not implemented in this prototype; its controls are disabled. View B uses X = observed indicator/variable and Y = target concept.
+View A rows are topics from `config/taxonomy.yaml`; columns are legal geographic units from that taxonomy plus named places explicitly present at an allowed level in approved observations. Each cell is internally scoped by the selected population group. Age/population, observation period, and source are filters, not matrix axes. Geography names and levels must match the source record; a country-level observation is never copied to an LGA or border-area cell. The initial configuration includes only `national`; add specific LGAs or named border areas only when a permitted source identifies them. No polygon map is bundled.
 
-View A gap states:
+View B rows are targets referenced by approved alignments; columns are observed indicators/variables. A missing relationship is not inferred from a similar name. Both projections come from the same approved, non-synthetic registry records held by the shared tensor. The empty youth batch therefore produces unknown View A cells and no invented View B alignments.
+
+### View A gap states
 
 `NOT_SEARCHED_OR_UNKNOWN`, `SEARCH_INCOMPLETE`, `SEARCHED_NO_DIRECT_EVIDENCE_FOUND`, `INDIRECT_OR_NOT_COMPARABLE_EVIDENCE`, `DIRECT_EVIDENCE_FOUND`, `MULTIPLE_INDEPENDENT_DIRECT_SOURCES`, `RESTRICTED_ACCESS`, `OUTDATED_OR_TEMPORALLY_MISMATCHED`, `INSUFFICIENT_GEOGRAPHIC_OR_POPULATION_DISAGGREGATION`.
 
-View B alignment classes:
+### View B alignment classes
 
 `DIRECT_MATCH`, `HARMONIZABLE`, `PROXY`, `CONCEPTUALLY_RELATED`, `INCOMPATIBLE`, `UNKNOWN_REQUIRES_REVIEW`.
 
-The state helper and tests distinguish `NOT_SEARCHED_OR_UNKNOWN` from `SEARCHED_NO_DIRECT_EVIDENCE_FOUND`; a search with five metadata candidates does not establish that the target evidence search is complete. Account count, account holders, and saved in the prior 12 months retain separate names and units. No observations are bundled.
+Search state affects a cell only when a completed/reviewed run has an explicit matching target, population, and geography scope. `NOT_SEARCHED_OR_UNKNOWN` is kept distinct from `SEARCHED_NO_DIRECT_EVIDENCE_FOUND`. Observation year and source publication year are separate fields.
 
-## Layers, provenance and extraction
+## Provenance, deduplication, review, and layers
 
-The matrices use the atlas palette: chart background `#0B1016`, lower problem teal, middle amber, higher rust, and neutral grey with the text label `UNKNOWN`. Map land (`#17222C`) and water (`#0A1119`) tokens are reserved; no geographic polygons are currently rendered. Both legends state direction semantics, but this prototype draws no vectors. Therefore arrow thickness/length are not currently visible; intended semantics are documented in `docs/visual_semantics.md`. Wind controls are disabled because there are no documented directional links or map coordinates. Friction is not rendered and has no interactive barrier detail drawer yet.
+The **Source registry** shows stable source IDs, DOI/URL, retrieval date, `review_status`, synthetic status, and underlying-data lineage. Pending bundles and metadata results are separate from formal sources. Exact DOI, URL, or normalized title duplicates are suppressed at CSV queue time. A shared `underlying_data_id` across distinct records is surfaced for lineage review and counted as one independent source. Provenance stays linked from product/indicator/variable/observation/alignment/barrier back to its source.
 
-The Source registry shows stable source/candidate IDs, DOI/URL and search-run IDs. Duplicate DOI/URL/title candidates are removed before the review queue; suppressed entries and citation lineage are not currently inspectable in the UI. Search output is stored in `search_candidates` with `PENDING_HUMAN_REVIEW`, separate from formal sources.
+Synthetic records are excluded from both projections and marked in the registry. A CSV row marked synthetic stays excluded even after approval. Unknown matrix cells use neutral charcoal and `///`; teal/amber/rust retain evidence and mismatch meanings. View A arrows point evidence/comparator → target gap; View B arrows point observed measure → target. Arrow thickness means deduplicated independent source count; length has no evidentiary meaning. Arrow labels show `RULE_DERIVED` or `HUMAN_REVIEWED`. Friction markers are selectable and expose typed barriers, evidence, and verification state. Wind remains disabled because this repository has no validated geolocated directional network and coordinate set; no field is synthesized.
 
-**LLM extraction is not implemented.** The environment variables in `.env.example` are placeholders only; no provider adapter, extraction flow, or LLM review queue is connected. Metadata search is ordinary Crossref/OpenAlex API discovery and does not call an LLM.
+## Search example and limits
 
-## One real metadata search (2026-10-22)
+Historical metadata smoke search recorded on **2026-10-22**: query `The Gambia savings account household survey`; provider **Crossref**; requested/returned **5/5** metadata candidates. These remain `PENDING_HUMAN_REVIEW` and are not youth evidence or approved findings. This was one short catalog query only: no title/full-text screening, coverage assessment, source validation, or measurement review. A zero-result search does not show that evidence does not exist, and a positive result does not establish that it answers the target question. To run an explicit search, use `python scripts/run_search.py --query "<query>" --provider crossref --limit 5`; it does not silently run at startup.
 
-- Provider: Crossref
-- Query: `The Gambia savings account household survey`
-- Requested maximum / returned: 5 / 5 metadata candidates
-- Result: candidates are in `data/registry.sqlite` under `PENDING_HUMAN_REVIEW`; none were promoted to formal sources or used as evidence.
-- Limitation: one short metadata query against Crossref only; no title/full-text screening, coverage assessment, OpenAlex search, source validation, or measurement review. Search results and zero-result searches cannot prove that evidence exists or does not exist.
+LLM extraction is **not implemented**. Search adapters retrieve bibliographic metadata only. They do not extract claims or automatically promote any record into evidence.
 
-## Verification and acceptance walkthrough (2026-10-22)
+## Current implementation verification (2026-10-22)
 
-Commands run after installing dependencies in `.venv`:
+- **CSV validation/import:** not run in this change because `data/youth/` is intentionally empty and no researcher-provided batch was supplied. No synthetic youth CSV was created.
+- **Tensor rebuild:** `python scripts/rebuild_tensor.py` passed; it wrote 7 configured target × population × national cells, all `NOT_SEARCHED_OR_UNKNOWN`, and 0 approved alignments from `data/youth/`.
+- **pytest:** `.venv` Python `-m pytest -q` passed: **27 passed in 0.55s** (the bare `pytest` command was not on PowerShell PATH).
+- **Streamlit:** port 8765 was already occupied. `python -m streamlit run app/app.py --server.headless true --server.address 127.0.0.1 --server.port 8767` started locally; HTTP returned 200. Streamlit AppTest loaded Overview and all five work pages with zero exceptions.
 
-| Step | Result |
-|---|---|
-| Dependency installation | Passed after environment correction and network approval. Bare PATH `python.exe` was blocked; Python 3.14.6 created `.venv`; `.venv\Scripts\python.exe -m pip install -e ".[dev]"` installed the editable project and dependencies. Initial sandbox attempt failed with PyPI `WinError 10013`; approved retry succeeded. |
-| `python scripts/validate_data.py --input data/demo/example.csv` | Passed; `Valid candidate rows: 3`, exit 0. |
-| `python scripts/rebuild_tensor.py` | Passed; `Tensor rebuilt deterministically from registry: 0 alignment records`, exit 0. |
-| `pytest -q` | Passed after final code edits; **15 passed in 0.13s**, exit 0. |
-| `streamlit run app/app.py --server.headless true --server.port 8765` | Final server started at `http://localhost:8765` (2026-10-22 12:05 EDT); HTTP 200. |
-| Streamlit `AppTest` | Overview and all five work pages passed with no app exceptions. A task form smoke check showed Markdown and JSON downloads after submit; a 99% formula scenario disabled Save. |
-| Crossref search | `The Gambia savings account household survey`, requested 5, returned 5 on 2026-10-22; all pending human review, none promoted. |
+## Reuse and deployment notes
 
-Additional requested workflow check: Research task Markdown and JSON exports **PASS (UI smoke)** — AppTest submitted a temporary task and both download controls appeared; the temporary row was removed.
+To reuse the project, fork the repository, place the research team's permitted source bundle CSVs in the configured `data/youth/` folder (or change `default_batch_dir` in `config/project.yaml`), update the project question and topics/geographic levels in `config/project.yaml` and `config/taxonomy.yaml`, then adjust comparability rules only after researcher review. The application reads repository batch files as pending candidates at startup; reviewers approve them in the registry. No source data is embedded in Python code.
 
-§14 walkthrough evidence and gaps:
+Before importing a source, review its terms, access restrictions, copyright, and ethics permissions in `docs/access_ethics.md`. Restricted person-level data is not included by default.
 
-| Acceptance item | Status / evidence |
-|---|---|
-| Starts without an LLM key | **PASS** — Streamlit AppTest ran with no LLM environment variables. |
-| Sample CSV enters canonical model | **PARTIAL** — validator accepted 3 rows; `--import-valid` writes source rows only, without linked products/variables or a review stage. |
-| Separate source/product/indicator/variable/observation/gap/alignment entities | **PASS (schema)** — separate SQLite tables in `src/evidence_gap/database.py`; the demo has no observations. |
-| Same approved records generate both heatmaps | **FAIL** — View B now renders only recorded alignment rows, but View A still uses an unsearched target/population status matrix rather than a shared batch of approved evidence records. |
-| National data never become subnational observations | **PASS (guard by omission)** — no geographic projection/imputation exists; `Observation.geography_level` is retained. No dedicated transform pipeline is implemented. |
-| Not searched differs from searched/no direct evidence | **PASS (logic/test)** — `tests/test_gap_states.py`; statuses remain distinct. The one metadata search does not mark target cells searched-complete. |
-| Microdata catalog can describe variables without person records | **PASS (metadata helper/schema)** — `micro_variables.describe_variable`; no person-level observation fixture is stored. |
-| Macro series records producer/collector/method/frequency/level/unit/definition | **PARTIAL** — `macro_series.validate_series_metadata` checks these fields, but no macro-series persistence table/UI exists. |
-| Every extracted claim has provenance and review status | **FAIL / N/A** — LLM extraction is not implemented. |
-| Repeated citation chains do not count as independent evidence | **PARTIAL** — `tests/test_search_deduplication.py` covers duplicate DOI; cross-DOI shared-source lineage and reviewer decisions are not implemented. |
-| Formula run stores version/weights/components/snapshot/time | **PARTIAL** — `formulas.record_formula_run` produces these fields; the UI does not create formula runs. Formula configurations can be saved by version. |
-| Invalid weight sums cannot be saved | **PASS (core + UI check)** — `tests/test_formula_versions.py`; AppTest changed weights to 99% and confirmed the Save button was disabled. |
-| Unknown components are not zero | **PASS (core test)** — formula returns `None` for missing inputs in `tests/test_formula_versions.py`; UI does not yet show component results. |
-| Vector directions | **PARTIAL** — `tests/test_vectors_wind_resistance.py` checks direction helpers; arrows are not drawn. |
-| Arrow width/length legends | **FAIL** — intended semantics are stated in the legend/docs, but no vector renderer or measured widths exist. |
-| Wind unavailable without suitable data | **PASS (logic)** — `tests/test_vectors_wind_resistance.py`; controls are disabled and explain missing relations/coordinates. |
-| Friction links to typed barriers/evidence/review | **FAIL** — barrier schema/helper exist; interactive barrier details are not implemented. |
-| Synthetic demo separated from real outputs | **PARTIAL** — fixtures and pages show `SYNTHETIC`; search candidates are separate from sources. There is no general export-layer synthetic exclusion mechanism. |
-| Tests cover required areas | **PARTIAL** — 15 tests pass, covering schemas, provenance, duplicate DOI, gap states, formula validation, tensor projections, country scope, task export helpers, wind gating and synthetic labels. Several missing UI features cannot yet be tested. |
-| README permissions/configuration/reproduction limitations | **PASS (document review)** — setup, config paths, access/ethics, search limits and implementation gaps are documented here and in `docs/access_ethics.md`. |
+The ignored `data/registry.sqlite` is a local runtime cache, not a deployment prerequisite. On a fresh runtime, the schema is created and bundled CSVs are re-queued from the repository batch folder. A shared production deployment still needs a persistent, access-controlled database and a reviewed permissions/backup plan; deployment is not configured or validated by this repository change. Do not commit `.env`, restricted imports, local SQLite files, or unapproved source material.
 
-## Design division audit
+## Not implemented / researcher decisions
 
-**Chart layer:** `app/components/dark_atlas.py` uses chart background `#0B1016`, vector/text off-white `#E8EEF2`, muted teal `#4B918C`, amber `#B58B48`, rust `#A34D42`, and neutral grey `#454B50`. Current matrix cells render neutral grey with a literal `UNKNOWN` label. Hatching is not implemented. Land `#17222C` and water `#0A1119` are reserved because no polygon map is rendered. No arrows are drawn, although the vector token and direction text are defined. Both heatmap pages render a legend. These map/vector/pattern gaps remain; the chart colors were not replaced with the interface’s monochrome palette.
+Not implemented: LLM extraction; geographic polygon rendering; modeled wind; macro-series visualization beyond its reviewable metadata table; automatic data transformations; and automated causal identification. Discrete vectors and barriers render only when approved records support them. Claim Audit can display only requirements and limits explicitly entered in reviewed records; collecting all required data does not itself identify a causal effect.
 
-**Interface layer:** source inspection confirms black `#050505` app background, white text, Georgia serif headings/body, 10px Courier New metadata, left alignment, 900px left-aligned edit pages, full-width chart pages, and left-column details on heatmap pages. Navigation radio markers are hidden to present plain text choices. Inputs use dark fills and bottom rules with white focus rules; buttons are square and text-led. No gradients, stock photos, rounded card grid, or decorative chart overlays are used. AppTest checks rendering/navigation, not pixel-level appearance.
-
-During this audit, the evidence map's placeholder mid-scale fill was replaced with neutral `UNKNOWN` cells, the matrix axes were corrected to population group × target, unsupported map/time filters and vector/friction/wind controls were disabled with reasons, and source details were moved to the heatmap pages' left column. A Streamlit import collision was fixed so the page checks could run. Remaining chart deviations are the absent map, hatching, vector and interactive friction layers noted above.
-
-## Remaining limits and research decisions
-
-The app is a prototype, not an evidence-gap finding. Missing functionality is listed above; in particular, LLM extraction, geographic maps, heatmaps populated from one shared set of approved records, vector rendering, interactive barriers, formula-run UI and complete CSV entity import remain unimplemented. See `docs/decisions_log.md` for unchanged researcher decisions and `docs/after-mvp.md` for future directions. Access rules and data permissions are in `docs/access_ethics.md`.
+Research decisions remain unresolved in `docs/decisions_log.md`, including target concept, eligible sources/populations/periods/geographies, direct-vs-proxy boundaries, transformation defensibility, source independence, what counts as sufficiently searched, documented-vs-hypothesized barriers, support for vector links, optional formula variables/weights, and data-sharing permissions. The configured youth topics reflect the requested project scope; they do not constitute reviewed operational definitions.

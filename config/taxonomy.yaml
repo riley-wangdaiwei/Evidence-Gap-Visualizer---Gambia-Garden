@@ -1,5 +1,16 @@
-populations: [national, adult, youth, household, institution]
-geographic_levels: [country, region, district, household, person, institution]
+population_groups: [youth]
+geographies:
+  - {name: national, level: country, aliases: ["The Gambia"]}
+  # Add named LGAs/border areas only after an approved source supports them.
+geographic_levels: [country, region, district, border_area, household, person, institution]
+targets:
+  - {id: youth-cannabis, name: "Youth use – cannabis", definition_source: configured_topic}
+  - {id: youth-kush-synthetic, name: "Youth use – kush / synthetic", definition_source: configured_topic}
+  - {id: treatment, name: "Treatment", definition_source: configured_topic}
+  - {id: prevention-programs, name: "Prevention programs", definition_source: configured_topic}
+  - {id: cross-border-flows, name: "Cross-border flows", definition_source: configured_topic}
+  - {id: livelihoods, name: "Livelihoods", definition_source: configured_topic}
+  - {id: illicit-finance, name: "Illicit finance", definition_source: configured_topic}
 source_types: [report, paper, dataset, catalog, administrative_record]
 review_statuses: [AI_SUGGESTED, RULE_DERIVED, HUMAN_REVIEWED, SOURCE_VERIFIED]
 gap_states: [NOT_SEARCHED_OR_UNKNOWN, SEARCH_INCOMPLETE, SEARCHED_NO_DIRECT_EVIDENCE_FOUND, INDIRECT_OR_NOT_COMPARABLE_EVIDENCE, DIRECT_EVIDENCE_FOUND, MULTIPLE_INDEPENDENT_DIRECT_SOURCES, RESTRICTED_ACCESS, OUTDATED_OR_TEMPORALLY_MISMATCHED, INSUFFICIENT_GEOGRAPHIC_OR_POPULATION_DISAGGREGATION]
