@@ -26,8 +26,8 @@ div[data-testid="stRadio"] label:has(input:checked){color:#fff;font-weight:700}
 div[data-testid="stRadio"] label>div:first-child{display:none}
 </style>""",unsafe_allow_html=True)
 batch=load_configured_batch(connect())
-from pages import evidence_gap_map,proxy_alignment_map,source_registry,formula_settings,research_tasks
-PAGES={"Overview":None,"Evidence gap map":evidence_gap_map,"Proxy alignment map":proxy_alignment_map,"Source registry":source_registry,"Formula settings":formula_settings,"Research tasks":research_tasks}
+from pages import evidence_gap_map,proxy_alignment_map,source_registry,formula_settings,research_tasks,draft_pilot_preview
+PAGES={"Draft pilot preview":draft_pilot_preview,"Overview":None,"Evidence gap map":evidence_gap_map,"Proxy alignment map":proxy_alignment_map,"Source registry":source_registry,"Formula settings":formula_settings,"Research tasks":research_tasks}
 with st.sidebar:
     st.markdown("## GAMBIA / EVIDENCE ATLAS")
     page=st.radio("NAVIGATION",list(PAGES),label_visibility="collapsed")
