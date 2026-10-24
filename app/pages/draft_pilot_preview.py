@@ -13,8 +13,7 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parents[2]
 PILOT = ["I009", "I013", "I014", "I015"]
 PARKED = ["I002", "I011", "I019", "I022", "I023", "I024"]
-ALIGNMENTS = ROOT / "data" / "imports" / "alignments.csv"
-INDICATORS = ROOT / "data" / "imports" / "indicators.csv"
+DATA_DIRS = [ROOT / "data" / "preview", ROOT / "data" / "imports"]
 RELATION_COLORS = {
     "DIRECT_MATCH": "#287B72",
     "HARMONIZABLE": "#4B918C",
@@ -28,11 +27,13 @@ DRAFT_BANNER = "DRAFT PREVIEW - NOT HUMAN REVIEWED - CANDIDATE DATA ONLY - DO NO
 SCOPE = "Pilot scope: 4 targets only (I009, I013, I014, I015); parked targets are not no-gap; this map is a pilot, not complete, especially I002 cannabis is parked."
 
 
-def read_csv(path):
-    if not path.exists():
-        return []
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        return list(csv.DictReader(handle))
+def read_csv(filename):
+    for directory in DATA_DIRS:
+        path = directory / filename
+        if path.exists():
+            with path.open("r", encoding="utf-8-sig", newline="") as handle:
+                return list(csv.DictReader(handle))
+    return []
 
 
 def frame_banner(view_name):
@@ -73,7 +74,7 @@ def render_view_b(alignments, indicators):
     for i,name in enumerate(RELATIONS):
         lo=0 if i==0 else (i-.5)/(len(RELATIONS)-1)
         hi=1 if i==len(RELATIONS)-1 else (i+.5)/(len(RELATIONS)-1)
-        scale.extend([[lo,RELATION_COLORS[name]],[hi,RELATION_COLORS[name]])
+        scale.extend([[lo,RELATION_COLORS[name]],[hi,RELATION_COLORS[name]]])
     fig=go.Figure(go.Heatmap(x=labels,y=[f"{t} · {target_names.get(t,'')}" for t in PILOT],z=z,zmin=0,zmax=len(RELATIONS)-1,colorscale=scale,showscale=False,text=text,texttemplate="%{text}",hovertext=hover,hovertemplate="%{hovertext}<extra></extra>",xgap=2,ygap=2))
     fig.update_layout(paper_bgcolor="#0B1016",plot_bgcolor="#0A1119",font={"color":"#E8EEF2"},margin={"l":10,"r":10,"t":25,"b":30},height=570)
     fig.update_xaxes(tickangle=-30,gridcolor="#26333D")
@@ -121,10 +122,10 @@ def render_view_a(alignments, indicators):
 
 
 def render():
-    alignments=read_csv(ALIGNMENTS)
-    indicators=read_csv(INDICATORS)
+    alignments=read_csv("alignments.csv")
+    indicators=read_csv("indicators.csv")
     if not alignments:
-        st.error("Draft preview unavailable: data/imports/alignments.csv is missing or empty.")
+        st.error("Draft preview unavailable: alignments.csv is missing or empty in data/preview/ and data/imports/.")
         return
     view_a,view_b=st.tabs(["View A · Pilot evidence gap","View B · Raw alignment categories"])
     with view_a:
