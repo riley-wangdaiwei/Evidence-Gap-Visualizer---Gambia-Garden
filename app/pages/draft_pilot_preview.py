@@ -647,7 +647,7 @@ def render_view_b(tables, measures, claims, alignments, alias_index, state_rows,
 
 
 def render():
-    filenames=["alignments.csv","indicators.csv","variables.csv","observations.csv","data_products.csv","sources.csv","gap_claims.csv","search_runs.csv"]
+    filenames=["alignments.csv","indicators.csv","variables.csv","observations.csv","data_products.csv","sources.csv","gap_claims.csv","search_runs.csv","barriers.csv","search_candidates.csv","concept_boxes.csv","mapping.csv"]
     loaded={}; available={}
     for filename in filenames:
         loaded[filename],path=load_csv(filename)
