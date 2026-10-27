@@ -494,7 +494,6 @@ def build_inventory(measures, tables, product_file_available, alignments, alias_
 
 
 def render_view_a(tables, measures, alignments, alias_index, product_file_available, state_rows, measure_unmapped):
-    banner("VIEW A - TOPIC INVENTORY BY OBSERVATION TIME")
     st.markdown("Layer A parents group Layer B operational measures. Heat counts distinct linked `data_product_id` values across all child measures in each parent/time bin, never documents and never claim fit. A separate claim-fit badge is shown in the box table.")
     child_rows, measure_time_products, measure_time_details, unmapped = build_inventory(measures, tables, product_file_available, alignments, alias_index)
     unmapped.extend(measure_unmapped)
@@ -564,7 +563,6 @@ def render_view_a(tables, measures, alignments, alias_index, product_file_availa
 
 
 def render_view_b(tables, measures, claims, alignments, alias_index, state_rows, measure_unmapped):
-    banner("VIEW B - TARGET CLAIM BY PLAUSIBLE OBSERVED MEASURE")
     st.markdown("Only explicit alignment records create colored cells. Blank intersections mean no alignment row was supplied; they are not generated pairings, search results, or proof of absence.")
     raw_columns={}
     cell_rows=defaultdict(list)
@@ -669,3 +667,4 @@ def render():
         render_view_a(loaded,measures,loaded["alignments.csv"],aliases,available["data_products.csv"],states,measure_unmapped)
     with view_b:
         render_view_b(loaded,measures,claims,loaded["alignments.csv"],aliases,states,measure_unmapped)
+    st.caption("Draft — candidate data only, not human reviewed.")
