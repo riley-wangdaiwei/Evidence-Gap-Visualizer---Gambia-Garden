@@ -495,7 +495,7 @@ def build_inventory(measures, tables, product_file_available, alignments, alias_
 
 def render_view_a(tables, measures, alignments, alias_index, product_file_available, state_rows, measure_unmapped):
     banner("VIEW A - TOPIC INVENTORY BY OBSERVATION TIME")
-    st.markdown("Layer A parents group Layer B operational measures. Heat counts distinct linked `data_product_id` values per topic/time bin, never documents and never claim fit. A separate claim-fit badge is shown in the box table.")
+    st.markdown("Layer A parents group Layer B operational measures. Heat counts distinct linked `data_product_id` values across all child measures in each parent/time bin, never documents and never claim fit. A separate claim-fit badge is shown in the box table.")
     child_rows, measure_time_products, measure_time_details, unmapped = build_inventory(measures, tables, product_file_available, alignments, alias_index)
     unmapped.extend(measure_unmapped)
     y_labels=[]; z=[]; cell_text=[]; hover=[]
@@ -504,50 +504,51 @@ def render_view_a(tables, measures, alignments, alias_index, product_file_availa
         if measure.get("topic_id") is not None:
             topic_child_list[measure["topic_id"]].append(measure)
     for topic_id, topic_name in TOPICS:
-        children=topic_child_list.get(topic_id) or [None]
-        for child in children:
-            child_name=child["label"] if child else "No mapped child measure in loaded CSVs"
-            y_labels.append(f"{topic_id:02d} | {topic_name} -> {child_name}")
-            row_z=[]; row_text=[]; row_hover=[]
-            for time_bin in TIME_BINS:
-                key=(child["key"],time_bin) if child else None
-                details=measure_time_details.get(key, []) if key else []
-                product_count=len(measure_time_products.get(key, set())) if key else 0
-                if child is None:
-                    value=0; label="UNKNOWN"
-                    status="UNKNOWN_REQUIRES_REVIEW - no child measure in loaded CSVs"
-                elif not product_file_available or (details and product_count == 0):
-                    value=0; label="UNKNOWN"
-                    status="UNKNOWN_REQUIRES_REVIEW - product/system ID unavailable"
-                elif product_count:
-                    value=min(product_count,3); label=f"{product_count} product(s)"
-                    status=f"INVENTORY_PRESENT - {product_count} distinct data product ID(s)"
-                    unknown_links=sum(1 for item in details if not item["measure"]["product_ids"])
-                    if unknown_links:
-                        label += f" + {unknown_links} UNKNOWN link(s)"
-                        status += f"; at least this many, with {unknown_links} unresolved product link(s)"
-                else:
-                    value=0; label="UNKNOWN"
-                    status="UNKNOWN_REQUIRES_REVIEW - no topic/time-specific product state supplied"
-                row_z.append(value); row_text.append(label)
-                if details:
-                    detail_items=[]
-                    for item in details:
-                        m=item["measure"]
-                        detail_items.append(
-                            f"Child: {m['label']}<br>Source: {m['title']} | source_id {m['source_id']}<br>Data product IDs: {', '.join(m['product_ids']) or 'UNKNOWN'}"
-                            f"<br>Data products: {', '.join(m['product_names']) or 'UNKNOWN'}"
-                            f"<br>Population: {m['population']}<br>Substance: {m['substance']}"
-                            f"<br>Observation year (raw): {item['raw_period']}<br>Outcome: {m['outcome']}"
-                            f"<br>Unit: {m['unit']}<br>Denominator: {m['denominator']}<br>Geography: {m['geography']}"
-                            f"<br>Method: {m['method']}<br>Can support: {m['can_support']}<br>Cannot support: {m['cannot_support']}"
-                            f"<br>Claim fit badge: {m['claim_fit_badge']}<br>Observation IDs: {', '.join(m['observation_ids']) or 'UNKNOWN'}"
-                        )
-                    detail_html="<br><br>".join(detail_items)
-                else:
-                    detail_html="No mapped child/product record for this topic/time cell. This UNKNOWN is not a no-evidence finding."
-                row_hover.append(f"Parent: {topic_name}<br>Child: {child_name}<br>Time: {time_bin}<br>Inventory state: {status}<br>Distinct product count: {product_count if product_count else 'UNKNOWN'}<br><br>{detail_html}")
-            z.append(row_z); cell_text.append(row_text); hover.append(row_hover)
+        children=topic_child_list.get(topic_id, [])
+        y_labels.append(f"{topic_id:02d} | {topic_name}")
+        row_z=[]; row_text=[]; row_hover=[]
+        for time_bin in TIME_BINS:
+            details=[]; product_ids=set()
+            for child in children:
+                key=(child["key"],time_bin)
+                details.extend(measure_time_details.get(key, []))
+                product_ids.update(measure_time_products.get(key, set()))
+            product_count=len(product_ids)
+            if not children:
+                value=0; label="UNKNOWN"
+                status="UNKNOWN_REQUIRES_REVIEW - no child measure in loaded CSVs"
+            elif not product_file_available or (details and product_count == 0):
+                value=0; label="UNKNOWN"
+                status="UNKNOWN_REQUIRES_REVIEW - product/system ID unavailable"
+            elif product_count:
+                value=min(product_count,3); label=f"{product_count} product(s)"
+                status=f"INVENTORY_PRESENT - {product_count} distinct data product ID(s)"
+                unknown_links=sum(1 for item in details if not item["measure"]["product_ids"])
+                if unknown_links:
+                    label += f" + {unknown_links} UNKNOWN link(s)"
+                    status += f"; at least this many, with {unknown_links} unresolved product link(s)"
+            else:
+                value=0; label="UNKNOWN"
+                status="UNKNOWN_REQUIRES_REVIEW - no topic/time-specific product state supplied"
+            row_z.append(value); row_text.append(label)
+            if details:
+                detail_items=[]
+                for item in details:
+                    m=item["measure"]
+                    detail_items.append(
+                        f"Child: {m['label']}<br>Source: {m['title']} | source_id {m['source_id']}<br>Data product IDs: {', '.join(m['product_ids']) or 'UNKNOWN'}"
+                        f"<br>Data products: {', '.join(m['product_names']) or 'UNKNOWN'}"
+                        f"<br>Population: {m['population']}<br>Substance: {m['substance']}"
+                        f"<br>Observation year (raw): {item['raw_period']}<br>Outcome: {m['outcome']}"
+                        f"<br>Unit: {m['unit']}<br>Denominator: {m['denominator']}<br>Geography: {m['geography']}"
+                        f"<br>Method: {m['method']}<br>Can support: {m['can_support']}<br>Cannot support: {m['cannot_support']}"
+                        f"<br>Claim fit badge: {m['claim_fit_badge']}<br>Observation IDs: {', '.join(m['observation_ids']) or 'UNKNOWN'}"
+                    )
+                detail_html="<br><br>".join(detail_items)
+            else:
+                detail_html="No mapped child/product record for this topic/time cell. This UNKNOWN is not a no-evidence finding."
+            row_hover.append(f"Parent: {topic_name}<br>Time: {time_bin}<br>Inventory state: {status}<br>Distinct product count: {product_count if product_count else 'UNKNOWN'}<br><br>{detail_html}")
+        z.append(row_z); cell_text.append(row_text); hover.append(row_hover)
     colorscale=[[0,"#454B50"],[0.166,"#454B50"],[0.167,"#4B918C"],[0.5,"#4B918C"],[0.501,"#B58B48"],[0.833,"#B58B48"],[0.834,"#A34D42"],[1,"#A34D42"]]
     fig=go.Figure(go.Heatmap(x=TIME_BINS,y=y_labels,z=z,zmin=0,zmax=3,colorscale=colorscale,showscale=False,text=cell_text,texttemplate="%{text}",hovertext=hover,hovertemplate="%{hovertext}<extra></extra>",xgap=2,ygap=2,connectgaps=False))
     fig.update_layout(paper_bgcolor="#0B1016",plot_bgcolor="#0A1119",font={"color":"#E8EEF2","size":10},margin={"l":360,"r":35,"t":40,"b":95},height=max(580, len(y_labels)*50))
