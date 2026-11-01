@@ -180,12 +180,6 @@ def _scope_panel():
     with st.expander("Fixed Method & Scope", expanded=False):
         for label, value in FIXED_SCOPE:
             st.markdown(f"**{label}:** {value}")
-        st.caption(
-            "Exploratory relevance scores are navigation aids only and do not gate visibility or scientific approval."
-        )
-        st.markdown(
-            "**Provisional relevance score:** R(c,m) = sum_k(w_k * s_k) / sum_k(w_k for known components), with coverage C(c,m) = known-component share. Missing data remain visible and are labelled UNKNOWN."
-        )
 
 
 def _canonical_parent_maps(parents):
