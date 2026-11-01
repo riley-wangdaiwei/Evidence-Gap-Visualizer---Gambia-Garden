@@ -1,10 +1,15 @@
 import csv
+import math
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
 
+import networkx as nx
+import numpy as np
+import plotly.graph_objects as go
 import streamlit as st
 import yaml
+from plotly.subplots import make_subplots
 
 from components.dark_atlas import RELATION_COLORS, categorical_scale, matrix
 
@@ -27,10 +32,28 @@ ALIGNMENT_CLASSES = [
     "INCOMPATIBLE",
     "UNKNOWN_REQUIRES_REVIEW",
 ]
+RELEVANCE_COMPONENTS = {
+    "concept / definition text": 0.25,
+    "Layer A topic overlap": 0.15,
+    "substance compatibility": 0.15,
+    "population overlap": 0.15,
+    "outcome / construct overlap": 0.15,
+    "observation-period compatibility": 0.05,
+    "unit / denominator / method compatibility": 0.05,
+    "geography compatibility": 0.05,
+}
 DISPLAY_COLORS = {
     **RELATION_COLORS,
     "NOT_ASSESSED": "#454B50",
     "NOT_APPLICABLE": "#26333D",
+    "MULTIPLE_STORED": "#8B6FA8",
+}
+PROVENANCE_COLORS = {
+    "OBSERVED": "#4B918C",
+    "RULE_DERIVED": "#B58B48",
+    "MODEL_SUGGESTED": "#9B70B3",
+    "SIMULATED / ILLUSTRATIVE": "#68717A",
+    "UNKNOWN": "#454B50",
 }
 
 FIXED_SCOPE = [
@@ -90,7 +113,13 @@ def _value(row, *keys, default="UNKNOWN"):
 
 
 def _is_unknown(value):
-    return not value or value.strip().upper() in {"UNKNOWN", "N/A", "NOT RECORDED"}
+    return not value or value.strip().upper() in {
+        "UNKNOWN",
+        "N/A",
+        "NOT RECORDED",
+        "NOT SPECIFIED",
+        "UNSPECIFIED",
+    }
 
 
 def _merge_sources(seed_rows, candidate_rows):
@@ -146,8 +175,39 @@ def load_inventory():
         "search_candidates",
     )
     raw = {}
+    csv_inventory = []
+    unparsed_rows = []
     for entity in entities:
         raw[entity] = _load_rows(entity)
+        seed_path = SEED_DIR / f"{entity}.csv"
+        candidate_path = _candidate_csv(entity) if CANDIDATE_DIR.is_dir() else None
+        for batch, path, rows in (
+            ("seed", seed_path, raw[entity][0]),
+            ("candidate", candidate_path, raw[entity][1]),
+        ):
+            if path is None or not path.is_file():
+                continue
+            csv_inventory.append(
+                {
+                    "batch": batch,
+                    "file": str(path.relative_to(ROOT)),
+                    "rows": len(rows),
+                    "columns": len(rows[0]) if rows else 0,
+                }
+            )
+            for row_number, row in enumerate(rows, start=2):
+                if None in row:
+                    unparsed_rows.append(
+                        {
+                            "batch": batch,
+                            "file": str(path.relative_to(ROOT)),
+                            "row": row_number,
+                            "extra_fields": row[None],
+                            "parsed_record": {
+                                key: value for key, value in row.items() if key is not None
+                            },
+                        }
+                    )
 
     seed_sources, candidate_sources = raw["sources"]
     sources, duplicate_sources = _merge_sources(seed_sources, candidate_sources)
@@ -167,6 +227,8 @@ def load_inventory():
             if row["duplicate_source_id"] != "UNKNOWN"
         },
         "parents": parents,
+        "csv_inventory": csv_inventory,
+        "unparsed_rows": unparsed_rows,
         "candidate_loaded": CANDIDATE_DIR.is_dir(),
         "candidate_files": sorted(
             path.name for path in CANDIDATE_DIR.glob("*.csv")
@@ -180,6 +242,25 @@ def _scope_panel():
     with st.expander("Fixed Method & Scope", expanded=False):
         for label, value in FIXED_SCOPE:
             st.markdown(f"**{label}:** {value}")
+        st.markdown(
+            "**Exploratory relevance:** R(c,m) = Σ(wₖ × sₖ) / Σ(wₖ for known components); "
+            "coverage C(c,m) = Σ(wₖ for known components). Fixed provisional weights are "
+            "0.25 concept, 0.15 topic, 0.15 substance, 0.15 population, 0.15 outcome, "
+            "0.05 period, 0.05 unit/method, 0.05 geography."
+        )
+        st.caption(
+            "R and C are RULE_DERIVED navigation aids, not scientific fit, causal effects, "
+            "or stored alignment classes. Missing inputs remain visible as UNKNOWN."
+        )
+        st.markdown(
+            "**Flow edge types:** funded_by, collected_by, produced_by, "
+            "indicator_defined_by, held_by/custodied_by, reported_to, accessible_through."
+        )
+        st.markdown(
+            "**Provenance:** OBSERVED = explicitly recorded; RULE_DERIVED = deterministic "
+            "calculation/layout; MODEL_SUGGESTED = model proposal; SIMULATED / ILLUSTRATIVE "
+            "= synthetic visual only; UNKNOWN = not established."
+        )
 
 
 def _canonical_parent_maps(parents):
@@ -202,6 +283,26 @@ def _parent_for_value(value, by_name, by_code):
     if not value:
         return None
     return by_name.get(value.casefold()) or by_code.get(value.casefold())
+
+
+def _compact_parent_label(parent):
+    normalized = parent.casefold()
+    compact = (
+        ("substance-specific", "T01 · Substance use"),
+        ("health outcomes", "T02 · Health harms"),
+        ("treatment/service", "T03 · Treatment access"),
+        ("prevention policies", "T04 · Prevention policy"),
+        ("programme delivery", "T05 · Programme delivery"),
+        ("post-participation", "T06 · Post-participation"),
+        ("enforcement/supply", "T07 · Enforcement / supply"),
+        ("social/livelihood", "T08 · Social / livelihood"),
+        ("cross-border", "T09 · Cross-border finance"),
+        ("data production", "T10 · Data governance"),
+    )
+    for token, label in compact:
+        if token in normalized:
+            return label
+    return "UNMAPPED / REVIEW_REQUIRED" if "unmapped" in normalized else parent[:35]
 
 
 def _source_parent_assignments(inventory):
@@ -260,7 +361,13 @@ def _source_parent_assignments(inventory):
 
 
 def _time_bin(source):
-    observed = _value(source, "observed_time", "observation_year", default="")
+    observed = _value(
+        source,
+        "observed_time",
+        "observation_period",
+        "observation_year",
+        default="",
+    )
     match = re.search(r"(?:19|20)\d{2}", observed)
     if not match:
         return TIME_BINS[-1]
@@ -380,6 +487,14 @@ def _product_records(inventory):
                         audit, "indicator_authority"
                     ),
                     "custodian": _value(audit, "custodian"),
+                    "reported_to": _value(audit, "reported_to", default="")
+                    if audit
+                    else _value(source, "reported_to", default=""),
+                    "access_authority": _value(
+                        audit, "access_authority", default=""
+                    )
+                    if audit
+                    else _value(source, "access_authority", default=""),
                     "access_rule": _value(
                         audit, "access_rule", default=""
                     )
@@ -410,72 +525,132 @@ def _source_record(inventory, source_id):
 
 
 def _measure_records(inventory):
-    seed_variables, candidate_variables = inventory["raw"]["variables"]
-    all_variables = [*seed_variables, *candidate_variables]
-    seed_observations, candidate_observations = inventory["raw"]["observations"]
-    observations = [*seed_observations, *candidate_observations]
-    products = [
-        *inventory["raw"]["data_products"][0],
-        *inventory["raw"]["data_products"][1],
+    all_variables = [
+        *inventory["raw"]["variables"][0],
+        *inventory["raw"]["variables"][1],
     ]
+    all_indicators = [
+        *inventory["raw"]["indicators"][0],
+        *inventory["raw"]["indicators"][1],
+    ]
+    observations = [
+        *inventory["raw"]["observations"][0],
+        *inventory["raw"]["observations"][1],
+    ]
+    products = [*inventory["raw"]["data_products"][0], *inventory["raw"]["data_products"][1]]
     products_by_source = defaultdict(list)
     for product in products:
         products_by_source[product.get("source_id", "")].append(product)
     observations_by_key = defaultdict(list)
     for observation in observations:
-        key = (
-            observation.get("source_id", ""),
-            observation.get("variable_id", ""),
-        )
-        observations_by_key[key].append(observation)
+        for id_field in ("variable_id", "indicator_id", "observed_indicator_id"):
+            record_id = observation.get(id_field, "")
+            if record_id:
+                observations_by_key[(observation.get("source_id", ""), record_id)].append(
+                    observation
+                )
 
-    unique = []
+    measures = []
     seen = set()
-    for variable in all_variables:
-        source_id = _value(variable, "source_id", default="")
-        variable_id = _value(variable, "variable_id", default="")
-        name = _value(variable, "variable_name", default="")
-        if not variable_id and not name:
-            continue
-        key = (source_id, variable_id or name)
-        if key in seen:
-            continue
-        seen.add(key)
-        source_products = products_by_source.get(source_id, [])
-        product = source_products[0] if len(source_products) == 1 else {}
-        matched_observations = observations_by_key.get((source_id, variable_id), [])
-        details = "; ".join(
-            " | ".join(
-                [
-                    f"time={_value(item, 'observed_time', 'observation_period')}",
-                    f"unit={_value(item, 'unit')}",
-                    f"denominator={_value(item, 'denominator')}",
-                    f"geography={_value(item, 'geography_level', 'geographic_level')}",
-                    f"value={_value(item, 'value')}",
-                ]
+    linked_measure_ids = set()
+    for kind, rows, id_field, name_fields, definition_fields in (
+        (
+            "INDICATOR",
+            all_indicators,
+            "indicator_id",
+            ("indicator_name", "indicator_title", "indicator_code"),
+            ("indicator_definition", "definition_verbatim", "indicator_note"),
+        ),
+        (
+            "VARIABLE",
+            all_variables,
+            "variable_id",
+            ("variable_name", "variable_title"),
+            ("variable_definition", "definition_verbatim"),
+        ),
+    ):
+        for row in rows:
+            source_id = _value(row, "source_id", default="")
+            measure_id = _value(row, id_field, default="")
+            name = _value(row, *name_fields, default="")
+            if not measure_id and not name:
+                continue
+            unique_key = (kind, source_id, measure_id or name)
+            if unique_key in seen:
+                continue
+            seen.add(unique_key)
+            if measure_id:
+                linked_measure_ids.add((source_id, measure_id))
+            source_products = products_by_source.get(source_id, [])
+            product = source_products[0] if len(source_products) == 1 else {}
+            matched_observations = observations_by_key.get((source_id, measure_id), [])
+            details = "; ".join(
+                " | ".join(
+                    [
+                        f"time={_value(item, 'observed_time', 'observation_period')}",
+                        f"unit={_value(item, 'unit')}",
+                        f"denominator={_value(item, 'denominator')}",
+                        f"geography={_value(item, 'geography_level', 'geographic_level')}",
+                        f"value={_value(item, 'value')}",
+                    ]
+                )
+                for item in matched_observations
             )
-            for item in matched_observations
-        )
-        unique.append(
+            measures.append(
+                {
+                    **row,
+                    "_measure_type": kind,
+                    "_measure_key": f"{kind[:1]}:{measure_id or name}",
+                    "_measure_label": f"{kind[:1]} · {measure_id or 'NO_ID'} · {name or 'Unnamed measure'}",
+                    "_measure_id": measure_id or name,
+                    "_definition": _value(row, *definition_fields),
+                    "_product_id": _value(product, "data_product_id", default="UNKNOWN")
+                    if product
+                    else "UNKNOWN",
+                    "_product_name": _value(
+                        product, "data_product_name", "title", default="UNKNOWN"
+                    )
+                    if product
+                    else "UNKNOWN",
+                    "_observation_details": details or "No linked observation row",
+                    "_observation_count": len(matched_observations),
+                }
+            )
+
+    for observation in observations:
+        source_id = _value(observation, "source_id", default="")
+        linked_id = _value(observation, "variable_id", "indicator_id", default="")
+        if linked_id and (source_id, linked_id) in linked_measure_ids:
+            continue
+        observation_id = _value(observation, "observation_id", default="")
+        name = _value(observation, "variable_name", "indicator_name", default="")
+        fallback_id = observation_id or linked_id or name
+        unique_key = ("OBSERVATION", source_id, fallback_id)
+        if not fallback_id or unique_key in seen:
+            continue
+        seen.add(unique_key)
+        measures.append(
             {
-                **variable,
-                "_measure_key": variable_id or f"{source_id}:{name}",
-                "_measure_label": f"{variable_id or 'NO_ID'} · {name or 'Unnamed variable'}",
-                "_product_id": _value(
-                    product, "data_product_id", default="UNKNOWN"
-                )
-                if product
-                else "UNKNOWN",
-                "_product_name": _value(
-                    product, "data_product_name", "title", default="UNKNOWN"
-                )
-                if product
-                else "UNKNOWN",
-                "_observation_details": details or "No linked observation row",
-                "_observation_count": len(matched_observations),
+                **observation,
+                "_measure_type": "OBSERVATION",
+                "_measure_key": f"O:{fallback_id}",
+                "_measure_label": f"O · {fallback_id} · {name or 'Unlinked observation'}",
+                "_measure_id": fallback_id,
+                "_definition": _value(
+                    observation, "definition_verbatim", "variable_definition", "indicator_definition"
+                ),
+                "_product_id": "UNKNOWN",
+                "_product_name": "UNKNOWN",
+                "_observation_details": (
+                    f"time={_value(observation, 'observed_time', 'observation_period')} | "
+                    f"unit={_value(observation, 'unit')} | "
+                    f"denominator={_value(observation, 'denominator')} | "
+                    f"value={_value(observation, 'value')}"
+                ),
+                "_observation_count": 1,
             }
         )
-    return unique
+    return measures
 
 
 def _claims(inventory):
@@ -492,8 +667,16 @@ def _claims(inventory):
         {
             "id": "CORE_UNDER18_PREVENTION_CAUSAL",
             "label": "CORE · Under-18 prevention participation → subsequent substance use",
+            "description": (
+                "Whether youth prevention programme participation reduces subsequent "
+                "substance use among under-18s."
+            ),
             "status": "CORE CLAIM",
             "match_ids": {"CORE_UNDER18_PREVENTION_CAUSAL", "Claim-CAUSE-01"},
+            "source_id": "USER_DEFINED",
+            "population": "Under-18",
+            "geography": "The Gambia",
+            "outcome": "Subsequent substance use",
         }
     ]
     for target_id in ("I009", "I013", "I014", "I015"):
@@ -504,8 +687,18 @@ def _claims(inventory):
             {
                 "id": target_id,
                 "label": f"{target_id} · Existing pilot target{suffix}",
+                "description": _value(
+                    row, "indicator_definition", "definition_verbatim", "indicator_note"
+                ),
                 "status": "EXISTING PILOT TARGET",
                 "match_ids": {target_id},
+                "source_id": _value(row, "source_id"),
+                "unit": _value(row, "unit", default=""),
+                "denominator": _value(row, "denominator", default=""),
+                "method": _value(row, "measurement_method", "method", default=""),
+                "geography": _value(row, "geography_level", "geographic_level", default=""),
+                "observation_period": _value(row, "observed_time", "observation_period", default=""),
+                "outcome": _value(row, "outcome", "construct", "indicator_type", default=""),
             }
         )
     memo_claims = [
@@ -538,8 +731,44 @@ def _claims(inventory):
             {
                 "id": claim_id,
                 "label": f"TEAM_CANDIDATE / MEMO CASE · {label} · not a source finding",
+                "description": label,
                 "status": "TEAM_CANDIDATE / MEMO CASE",
                 "match_ids": {claim_id, *stored_claim_ids},
+                "source_id": "TEAM_MEMO",
+                "population": "School-going ages 13-15"
+                if claim_id == "MEMO_CASE_GYTS"
+                else "UNKNOWN",
+                "geography": "The Gambia",
+                "outcome": label,
+            }
+        )
+    for row in [
+        *inventory["raw"]["gap_claims"][0],
+        *inventory["raw"]["gap_claims"][1],
+    ]:
+        gap_id = _value(row, "gap_claim_id", default="")
+        if not gap_id:
+            continue
+        area = _value(row, "claim_area", "gap_claim_type", default="Source-stated gap")
+        description = _value(
+            row, "claim_interpretation", "evidence_quote", "definition_verbatim"
+        )
+        claims.append(
+            {
+                "id": gap_id,
+                "label": f"SOURCE-STATED GAP · {_value(row, 'source_id')} · {area}",
+                "description": description,
+                "status": "SOURCE_STATED / CANDIDATE",
+                "match_ids": {gap_id},
+                "source_id": _value(row, "source_id"),
+                "unit": _value(row, "unit", default=""),
+                "denominator": _value(row, "denominator", default=""),
+                "method": _value(row, "method", "measurement_method", default=""),
+                "geography": _value(row, "geography_level", "geographic_level", default=""),
+                "observation_period": _value(row, "observed_time", "observation_period", default=""),
+                "population": _value(row, "original_age", "original_age_group", default=""),
+                "substance": _value(row, "substance", default=""),
+                "outcome": _value(row, "claim_area", "gap_claim_type", default=""),
             }
         )
     return claims
@@ -550,7 +779,7 @@ def _alignment_lookup(inventory):
     lookup = defaultdict(list)
     for row in rows:
         relation = _value(row, "relationship_class", default="")
-        if relation not in ALIGNMENT_CLASSES:
+        if relation not in {*ALIGNMENT_CLASSES, "NOT_APPLICABLE"}:
             continue
         claim_ids = {
             value
@@ -579,24 +808,457 @@ def _alignment_lookup(inventory):
     return rows, lookup
 
 
+STOP_WORDS = {
+    "about",
+    "after",
+    "among",
+    "and",
+    "are",
+    "been",
+    "between",
+    "from",
+    "into",
+    "more",
+    "over",
+    "participation",
+    "programme",
+    "should",
+    "that",
+    "their",
+    "there",
+    "these",
+    "this",
+    "through",
+    "under",
+    "what",
+    "when",
+    "where",
+    "which",
+    "with",
+    "youth",
+}
+
+
+def _entity_rows(inventory, entity):
+    return [*inventory["raw"][entity][0], *inventory["raw"][entity][1]]
+
+
+def _tokens(text):
+    if _is_unknown(str(text or "")):
+        return set()
+    return {
+        token.casefold()
+        for token in re.findall(r"[a-zA-Z0-9]+", str(text))
+        if len(token) > 1 and token.casefold() not in STOP_WORDS
+    }
+
+
+def _text_similarity(left, right):
+    left_tokens = _tokens(left)
+    right_tokens = _tokens(right)
+    if not left_tokens or not right_tokens:
+        return None
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+
+def _year_range(value):
+    years = [int(year) for year in re.findall(r"(?:19|20)\d{2}", str(value or ""))]
+    return (min(years), max(years)) if years else None
+
+
+def _age_interval(value):
+    text = str(value or "").casefold()
+    if not text or _is_unknown(text):
+        return None
+    numbers = [int(number) for number in re.findall(r"\d{1,2}", text)]
+    if len(numbers) >= 2:
+        return min(numbers[0], numbers[1]), max(numbers[0], numbers[1])
+    if "adult" in text or "18+" in text:
+        return 18, 100
+    if any(term in text for term in ("under-18", "under 18", "minor", "adolescent", "child")):
+        return 0, 17
+    if "youth" in text:
+        return 15, 24
+    if numbers:
+        return numbers[0], numbers[0]
+    return None
+
+
+def _relevance_components(claim, measure, source, parents):
+    claim_text = " ".join(
+        [
+            str(claim.get("label", "")),
+            str(claim.get("description", "")),
+        ]
+    )
+    measure_text = " ".join(
+        [
+            str(measure.get("_measure_label", "")),
+            str(measure.get("_definition", "")),
+            str(measure.get("variable_name", "")),
+            str(measure.get("indicator_name", "")),
+        ]
+    )
+    outcome_vocabulary = {
+        "use",
+        "prevalence",
+        "frequency",
+        "participation",
+        "reach",
+        "coverage",
+        "effect",
+        "harms",
+        "health",
+        "treatment",
+        "access",
+        "arrest",
+        "seizure",
+        "supply",
+        "risk",
+        "knowledge",
+        "attitude",
+        "resilience",
+        "initiation",
+        "onset",
+    }
+    claim_outcomes = _tokens(
+        _value(claim, "outcome", default="") or claim_text
+    ) & outcome_vocabulary
+    measure_outcomes = _tokens(
+        " ".join(
+            [
+                _value(measure, "outcome", "construct", "indicator_type", default=""),
+                measure_text,
+            ]
+        )
+    ) & outcome_vocabulary
+    components = {
+        "concept / definition text": _text_similarity(claim_text, measure_text),
+        "Layer A topic overlap": None,
+        "substance compatibility": None,
+        "population overlap": None,
+        "outcome / construct overlap": (
+            len(claim_outcomes & measure_outcomes) / len(claim_outcomes | measure_outcomes)
+            if claim_outcomes and measure_outcomes
+            else None
+        ),
+        "observation-period compatibility": None,
+        "unit / denominator / method compatibility": None,
+        "geography compatibility": None,
+    }
+
+    assigned_parents = parents.get(source.get("source_id", ""), set())
+    if assigned_parents:
+        components["Layer A topic overlap"] = max(
+            (
+                _text_similarity(claim_text, parent)
+                for parent in assigned_parents
+                if _text_similarity(claim_text, parent) is not None
+            ),
+            default=0.0,
+        )
+
+    measure_substance = _value(measure, "substance", default="")
+    if not _is_unknown(measure_substance):
+        known_substances = {
+            "tobacco": ("tobacco", "nicotine", "cigarette", "smoking"),
+            "cannabis": ("cannabis",),
+            "kush": ("kush",),
+            "heroin": ("heroin",),
+            "cocaine": ("cocaine",),
+            "synthetic": ("synthetic",),
+        }
+        claim_substances = {
+            name
+            for name, terms in known_substances.items()
+            if any(term in claim_text.casefold() for term in terms)
+        }
+        measured_names = {
+            name
+            for name, terms in known_substances.items()
+            if any(term in measure_substance.casefold() for term in terms)
+        }
+        if claim_substances:
+            components["substance compatibility"] = float(
+                bool(claim_substances & measured_names)
+            )
+        elif "substance" in claim_text.casefold():
+            components["substance compatibility"] = 0.5
+
+    claim_age = _age_interval(_value(claim, "population", default=""))
+    if not claim_age and any(
+        term in claim_text.casefold()
+        for term in ("under-18", "under 18", "minor", "adolescent")
+    ):
+        claim_age = (0, 17)
+    measure_age = _age_interval(
+        _value(measure, "original_age", "original_age_group", default="")
+    )
+    if claim_age and measure_age:
+        overlap = max(0, min(claim_age[1], measure_age[1]) - max(claim_age[0], measure_age[0]) + 1)
+        total = max(1, measure_age[1] - measure_age[0] + 1)
+        components["population overlap"] = overlap / total
+
+    claim_period = _year_range(
+        _value(claim, "observation_period", "observed_time", default="")
+    )
+    measure_period = _year_range(
+        _value(measure, "observed_time", "observation_period", "observation_year", default="")
+    )
+    if claim_period and measure_period:
+        overlap = max(
+            0,
+            min(claim_period[1], measure_period[1])
+            - max(claim_period[0], measure_period[0])
+            + 1,
+        )
+        total = max(1, measure_period[1] - measure_period[0] + 1)
+        components["observation-period compatibility"] = overlap / total
+
+    geography = _value(
+        measure,
+        "geography_level",
+        "geographic_level",
+        "geography",
+        default=_value(source, "geography_level", "geographic_level", default=""),
+    )
+    claim_geography = _value(claim, "geography", default="The Gambia")
+    if not _is_unknown(geography):
+        geography_text = geography.casefold()
+        source_context = " ".join(
+            _value(source, key, default="")
+            for key in ("title", "source_url_or_doi", "geography_level", "geographic_level")
+        ).casefold()
+        if (
+            ("gambia" in geography_text or "gambia" in source_context)
+            and "gambia" in claim_geography.casefold()
+        ):
+            components["geography compatibility"] = 1.0
+        elif any(term in geography_text for term in ("regional", "multi-country", "west africa")):
+            components["geography compatibility"] = 0.5
+        elif "national" in geography_text and "gambia" in claim_geography.casefold():
+            components["geography compatibility"] = 0.5
+        else:
+            components["geography compatibility"] = 0.0
+
+    claim_unit = " ".join(
+        str(claim.get(key) or "")
+        for key in ("unit", "denominator", "method")
+        if not _is_unknown(str(claim.get(key) or ""))
+    )
+    measure_unit = " ".join(
+        str(measure.get(key) or "")
+        for key in ("unit", "denominator", "measurement_method", "method")
+        if not _is_unknown(str(measure.get(key) or ""))
+    )
+    if claim_unit and measure_unit:
+        components["unit / denominator / method compatibility"] = _text_similarity(
+            claim_unit, measure_unit
+        )
+    return components
+
+
+def _relevance_score(components):
+    known_weight = sum(
+        weight
+        for name, weight in RELEVANCE_COMPONENTS.items()
+        if components.get(name) is not None
+    )
+    if not known_weight:
+        return None, 0.0
+    score = sum(
+        RELEVANCE_COMPONENTS[name] * components[name]
+        for name in RELEVANCE_COMPONENTS
+        if components.get(name) is not None
+    ) / known_weight
+    return score, known_weight
+
+
+@st.cache_data(show_spinner=False)
+def _semantic_projection(inventory):
+    parents, parent_assignments = _source_parent_assignments(inventory)
+    records = []
+    for source in inventory["sources"]:
+        records.append(
+            {
+                "id": _value(source, "source_id"),
+                "type": "DOCUMENT",
+                "title": _value(source, "title"),
+                "source_id": _value(source, "source_id"),
+                "url": _value(source, "source_url_or_doi"),
+                "text": " ".join(
+                    _value(source, key, default="")
+                    for key in ("title", "definition_verbatim", "source_note", "abstract")
+                ),
+                "parent": next(
+                    iter(sorted(parent_assignments.get(source.get("source_id", ""), set()))),
+                    "UNMAPPED / REVIEW_REQUIRED",
+                ),
+            }
+        )
+    for measure in _measure_records(inventory):
+        source = _source_record(inventory, measure.get("source_id", ""))
+        records.append(
+            {
+                "id": measure["_measure_key"],
+                "type": measure["_measure_type"],
+                "title": measure["_measure_label"],
+                "source_id": _value(source, "source_id"),
+                "url": _value(source, "source_url_or_doi"),
+                "text": " ".join(
+                    [
+                        measure["_measure_label"],
+                        measure["_definition"],
+                        _value(measure, "substance"),
+                    ]
+                ),
+                "parent": next(
+                    iter(sorted(parent_assignments.get(source.get("source_id", ""), set()))),
+                    "UNMAPPED / REVIEW_REQUIRED",
+                ),
+            }
+        )
+    for claim in _claims(inventory):
+        records.append(
+            {
+                "id": claim["id"],
+                "type": "CLAIM",
+                "title": claim["label"],
+                "source_id": claim.get("source_id", "UNKNOWN"),
+                "url": _value(_source_record(inventory, claim.get("source_id", "")), "source_url_or_doi"),
+                "text": f"{claim['label']} {claim.get('description', '')}",
+                "parent": "CLAIM",
+            }
+        )
+    return records
+
+
+@st.cache_data(show_spinner=False)
+def _tfidf_pca(records):
+    token_rows = [_tokens(record["text"]) for record in records]
+    vocabulary = sorted(set().union(*token_rows)) if token_rows else []
+    if not records or not vocabulary:
+        return np.zeros((len(records), 2))
+    token_index = {token: index for index, token in enumerate(vocabulary)}
+    matrix_values = np.zeros((len(records), len(vocabulary)), dtype=float)
+    document_frequency = Counter(token for row in token_rows for token in row)
+    for row_index, tokens in enumerate(token_rows):
+        if not tokens:
+            continue
+        for token in tokens:
+            matrix_values[row_index, token_index[token]] = 1.0
+    inverse_frequency = np.array(
+        [
+            math.log((1 + len(records)) / (1 + document_frequency[token])) + 1
+            for token in vocabulary
+        ]
+    )
+    matrix_values *= inverse_frequency
+    norms = np.linalg.norm(matrix_values, axis=1, keepdims=True)
+    matrix_values = np.divide(
+        matrix_values,
+        norms,
+        out=np.zeros_like(matrix_values),
+        where=norms != 0,
+    )
+    centered = matrix_values - matrix_values.mean(axis=0, keepdims=True)
+    if centered.shape[0] < 2:
+        return np.zeros((len(records), 2))
+    left, singular_values, right = np.linalg.svd(centered, full_matrices=False)
+    dimensions = min(2, len(singular_values))
+    coordinates = np.zeros((len(records), 2))
+    coordinates[:, :dimensions] = left[:, :dimensions] * singular_values[:dimensions]
+    for axis in range(dimensions):
+        anchor = int(np.argmax(np.abs(right[axis])))
+        if right[axis, anchor] < 0:
+            coordinates[:, axis] *= -1
+    return coordinates
+
+
+@st.cache_data(show_spinner=False)
+def _spring_layout_coordinates(node_ids, edges):
+    layout_graph = nx.Graph()
+    layout_graph.add_nodes_from(node_ids)
+    layout_graph.add_edges_from(edges)
+    if not node_ids:
+        return {}
+    positions = nx.spring_layout(
+        layout_graph,
+        seed=2026,
+        iterations=24,
+        k=1 / math.sqrt(max(len(node_ids), 1)),
+        weight=None,
+    )
+    return {
+        node_id: (float(position[0]), float(position[1]))
+        for node_id, position in positions.items()
+    }
+
+
 def _fixed_method_content():
     _scope_panel()
 
 
 def render_readme(inventory):
+    documents, _ = _document_rows(inventory)
+    measures = _measure_records(inventory)
+    claims = _claims(inventory)
+    products = _entity_rows(inventory, "data_products")
+    observations = _entity_rows(inventory, "observations")
+    families = {
+        row["source_family"]
+        for row in documents
+    }
+
     st.markdown("# Gambia Evidence Gap Explorer")
-    st.markdown("**Pilot:** Youth Drug Prevention in The Gambia")
+    st.markdown("### Exploratory Evidence Atlas")
     st.caption(
-        "V1 one-time graph build · candidate inventory only · no human assessment or approval in this run"
+        "Maximal visibility mode · all relevant seed and candidate rows remain explorable "
+        "regardless of review, access, age, or alignment state."
+    )
+    columns = st.columns(5)
+    for column, label, value in zip(
+        columns,
+        ("Documents", "Source families", "Data products", "Measures", "Claims"),
+        (
+            len(documents),
+            len(families),
+            len(products),
+            len(measures),
+            len(claims),
+        ),
+    ):
+        column.metric(label, value)
+    st.markdown(
+        "**Four views:** README / Overview · View A Topic Inventory · View B Claim & Measure Audit · "
+        "View C Data Production Flow."
+    )
+    st.info(
+        "The atlas maximizes visibility, not certainty. Candidate status, restricted access, "
+        "unknown metadata, and weak or absent alignments never hide a record."
     )
     st.markdown("### Fixed Method & Scope")
     for label, value in FIXED_SCOPE:
         st.markdown(f"**{label}:** {value}")
-    st.markdown("### Layer A parents")
+    st.markdown("### Fixed Layer A parents")
     parents, _, _ = _canonical_parent_maps(inventory["parents"])
     st.markdown(" · ".join(parents) if parents else "Not configured in seed concept boxes.")
 
-    st.markdown("### Formula / weights (read-only)")
+    st.markdown("### Exploratory claim–measure relevance (read-only)")
+    st.dataframe(
+        [
+            {"component": name, "fixed weight": weight}
+            for name, weight in RELEVANCE_COMPONENTS.items()
+        ],
+        hide_index=True,
+        width="stretch",
+    )
+    st.caption(
+        "Formula: R(c,m) = weighted mean over known components; C(c,m) = sum of weights "
+        "for known components. R and C are RULE_DERIVED navigation aids only. They never "
+        "create or modify a stored alignment."
+    )
+    st.markdown("### Configured measurement formula (separate, read-only)")
     formula_path = ROOT / "config" / "measures.yaml"
     if formula_path.is_file():
         config = yaml.safe_load(formula_path.read_text(encoding="utf-8")) or {}
@@ -608,115 +1270,511 @@ def render_readme(inventory):
                 "unknown_policy": config.get("unknown_policy", "Not configured"),
             }
         )
-        st.caption("Inventory counts are unweighted. No user-editable weight or source controls are provided.")
     else:
-        st.info("Formula / weights: Not configured.")
-    st.markdown("### Inventory provenance")
+        st.info("config/measures.yaml: Not configured.")
+    st.caption("Configured mismatch weights are not applied to inventory counts or exploratory R.")
+
+    st.markdown("### Loaded CSV inventory · raw inputs retained")
+    st.dataframe(inventory["csv_inventory"], hide_index=True, width="stretch")
     if inventory["candidate_loaded"]:
-        st.write(f"Candidate batch loaded from `data/candidate_2026-10-31/` ({len(inventory['candidate_files'])} CSV files).")
+        st.success(
+            f"Candidate batch loaded: {len(inventory['candidate_files'])} CSV files. "
+            "Seed CSVs remain read-only."
+        )
     else:
         st.warning("candidate batch not loaded")
-    st.write(f"Seed input: `data/preview/` (read-only).")
-    st.write(f"Documentary items after source_id / URL deduplication: {len(inventory['sources'])}.")
-    if inventory["duplicate_sources"]:
-        st.warning(
-            f"{len(inventory['duplicate_sources'])} duplicate source_id/URL rows were reported; seed rows take precedence."
+    st.caption(
+        f"Seed source rows: {len(inventory['raw']['sources'][0])} · candidate source rows: "
+        f"{len(inventory['raw']['sources'][1])} · unique displayed documents after exact "
+        f"source-ID/URL deduplication: {len(documents)} · observation rows retained: {len(observations)}."
+    )
+    st.markdown("### Provenance states")
+    provenance_columns = st.columns(len(PROVENANCE_COLORS))
+    for column, (state, color) in zip(provenance_columns, PROVENANCE_COLORS.items()):
+        column.markdown(
+            f"<div style='border-left:4px solid {color};padding:.35rem .55rem;"
+            f"background:#111820'><b>{state}</b></div>",
+            unsafe_allow_html=True,
         )
-        st.dataframe(inventory["duplicate_sources"], hide_index=True, use_container_width=True)
-    st.caption("Every record remains CANDIDATE_PENDING_HUMAN_REVIEW. Nothing is approved or promoted in this run.")
+    st.caption(
+        "Search frame is bounded and not exhaustive. Observation time and publication time "
+        "remain separate. No national value is expanded into a subnational record."
+    )
+    if inventory["duplicate_sources"]:
+        with st.expander(f"Exact source duplicates reported ({len(inventory['duplicate_sources'])})"):
+            st.dataframe(
+                inventory["duplicate_sources"],
+                hide_index=True,
+                width="stretch",
+            )
+    if inventory["unparsed_rows"]:
+        with st.expander(f"CSV rows with extra/unparsed fields ({len(inventory['unparsed_rows'])})"):
+            st.dataframe(
+                inventory["unparsed_rows"],
+                hide_index=True,
+                width="stretch",
+            )
+    st.caption(
+        "All source and candidate review labels are displayed as recorded; this exploratory "
+        "release does not approve, reject, or promote evidence."
+    )
 
 
 def render_view_a(inventory):
+    documents, parent_axis = _document_rows(inventory)
     st.markdown("# View A · Topic Inventory")
     st.markdown(
-        "Documentary items in topic scope, whether or not they answer a research claim. Heat encodes document counts."
+        "Full topic universe and linked data layers. Review status, access, population "
+        "scope, and alignment never gate visibility."
     )
     _fixed_method_content()
-    documents, parent_axis = _document_rows(inventory)
-    counts = Counter(
-        (parent, row["_time_bin"])
-        for row in documents
-        for parent in row["_parents"]
+
+    filter_keys = (
+        "v1_filter_search",
+        "v1_filter_parent",
+        "v1_filter_time",
+        "v1_filter_publication",
+        "v1_filter_substance",
+        "v1_filter_age",
+        "v1_filter_geography",
+        "v1_filter_source_type",
+        "v1_filter_access",
+        "v1_filter_review",
+        "v1_filter_box",
     )
-    z = [[counts[(parent, period)] for period in TIME_BINS] for parent in parent_axis]
-    maximum = max((max(line) for line in z), default=0)
-    hover = [
-        [
-            f"{parent}<br>{period}<br>Documents: {counts[(parent, period)]}<br>"
-            "Distinct source families and data products are shown in the detail table."
-            for period in TIME_BINS
+    if st.button("Show all / reset filters", key="v1_reset_filters"):
+        for key in filter_keys:
+            st.session_state[key] = "" if key.endswith("search") else []
+        st.rerun()
+
+    parents, parent_assignments = _source_parent_assignments(inventory)
+    mapping_boxes = defaultdict(set)
+    for row in _entity_rows(inventory, "mapping"):
+        if row.get("source_id") and row.get("operational_box_id"):
+            mapping_boxes[row["source_id"]].add(row["operational_box_id"])
+    filter_values = {
+        "parent": parent_axis,
+        "time": TIME_BINS,
+        "publication": sorted(
+            {
+                _value(row, "publication_time", "publication_year")
+                for row in documents
+                if not _is_unknown(_value(row, "publication_time", "publication_year"))
+            }
+        ),
+        "substance": sorted({_value(row, "substance") for row in documents}),
+        "age": sorted({_value(row, "original_age", "original_age_group") for row in documents}),
+        "geography": sorted(
+            {_value(row, "geography_level", "geographic_level") for row in documents}
+        ),
+        "source_type": sorted({_value(row, "source_type", "record_entity_type") for row in documents}),
+        "access": sorted({_value(row, "access_rule", "access_status") for row in documents}),
+        "review": sorted({_value(row, "review_status") for row in documents}),
+        "box": sorted(
+            {
+                box
+                for source_boxes in mapping_boxes.values()
+                for box in source_boxes
+            }
+        ),
+    }
+    with st.expander("Inventory filters · defaults include every record", expanded=True):
+        search = st.text_input("Search sources and metadata", key="v1_filter_search").casefold()
+        filter_columns = st.columns(3)
+        selected = {}
+        for column, (name, label, state_key) in zip(
+            filter_columns * 3,
+            (
+                ("parent", "Layer A parent", "v1_filter_parent"),
+                ("time", "Observation-time bin", "v1_filter_time"),
+                ("publication", "Publication time", "v1_filter_publication"),
+                ("substance", "Substance", "v1_filter_substance"),
+                ("age", "Age / population", "v1_filter_age"),
+                ("geography", "Geography", "v1_filter_geography"),
+                ("source_type", "Source type", "v1_filter_source_type"),
+                ("access", "Access status", "v1_filter_access"),
+                ("review", "Review status", "v1_filter_review"),
+            ),
+        ):
+            selected[name] = column.multiselect(
+                label,
+                filter_values[name],
+                key=state_key,
+                help="Leave empty to include all values.",
+            )
+        selected["box"] = st.multiselect(
+            "Layer B operational box",
+            filter_values["box"],
+            key="v1_filter_box",
+            help="Leave empty to include all operational boxes.",
+        )
+
+    filtered_documents = []
+    for row in documents:
+        source_id = row["source_id"]
+        values = {
+            "parent": set(row["_parents"]),
+            "time": {row["_time_bin"]},
+            "publication": {_value(row, "publication_time", "publication_year")},
+            "substance": {_value(row, "substance")},
+            "age": {_value(row, "original_age", "original_age_group")},
+            "geography": {_value(row, "geography_level", "geographic_level")},
+            "source_type": {_value(row, "source_type", "record_entity_type")},
+            "access": {_value(row, "access_rule", "access_status")},
+            "review": {_value(row, "review_status")},
+            "box": mapping_boxes.get(source_id, set()),
+        }
+        if any(selection and not (selection & values[name]) for name, selection in selected.items()):
+            continue
+        searchable = " ".join(
+            str(value or "")
+            for value in row.values()
+            if not isinstance(value, (list, dict, set))
+        ).casefold()
+        if search and search not in searchable:
+            continue
+        filtered_documents.append(row)
+
+    st.caption(
+        f"Visible after explicit filters: {len(filtered_documents)} / {len(documents)} documents. "
+        "No filter mutates the loaded inventory; reset returns to all records."
+    )
+    count_mode = st.selectbox(
+        "Heat unit · entity types are never summed together",
+        ("Documents", "Data products", "Indicators", "Variables", "Observations"),
+        key="v1_heat_unit",
+    )
+    source_ids = {
+        row["source_id"]
+        for row in filtered_documents
+    }
+    all_document_source_ids = {row["source_id"] for row in documents}
+    filters_active = bool(search) or any(bool(values) for values in selected.values())
+    entity_configs = {
+        "Documents": ("sources", "source_id", ("title",)),
+        "Data products": ("data_products", "data_product_id", ("data_product_name", "title")),
+        "Indicators": ("indicators", "indicator_id", ("indicator_name", "indicator_code")),
+        "Variables": ("variables", "variable_id", ("variable_name",)),
+        "Observations": ("observations", "observation_id", ("variable_id",)),
+    }
+    entity, id_field, name_fields = entity_configs[count_mode]
+    heat_records = []
+    if count_mode == "Documents":
+        heat_records = [
+            {
+                **row,
+                "_count_id": row["source_id"],
+                "_parents": row["_parents"],
+                "_time_bin": row["_time_bin"],
+            }
+            for row in filtered_documents
         ]
-        for parent in parent_axis
+    else:
+        seen_entities = set()
+        for row_index, row in enumerate(_entity_rows(inventory, entity)):
+            raw_source_id = _value(row, "source_id", default="")
+            source_id = inventory["source_aliases"].get(raw_source_id, raw_source_id)
+            if source_id in all_document_source_ids and source_id not in source_ids:
+                continue
+            item_id = _value(row, id_field, default="") or f"ROW_{row_index + 1}"
+            entity_key = (source_id, item_id)
+            if entity_key in seen_entities:
+                continue
+            seen_entities.add(entity_key)
+            source = _source_record(inventory, source_id)
+            observation_time = _value(
+                row,
+                "observed_time",
+                "observation_period",
+                "observation_year",
+                default=_value(source, "observed_time", "observation_period", "observation_year", default=""),
+            )
+            item_time_bin = _time_bin({"observed_time": observation_time})
+            item_parents = sorted(
+                parent_assignments.get(source_id, set()),
+                key=parents.index,
+            ) or ["UNMAPPED / REVIEW_REQUIRED"]
+            if source_id not in all_document_source_ids and filters_active:
+                orphan_values = {
+                    "parent": set(item_parents),
+                    "time": {item_time_bin},
+                    "publication": {
+                        _value(row, "publication_time", "publication_year", default="")
+                    },
+                    "substance": {_value(row, "substance", default="")},
+                    "age": {_value(row, "original_age", "original_age_group", default="")},
+                    "geography": {
+                        _value(row, "geography_level", "geographic_level", default="")
+                    },
+                    "source_type": {
+                        _value(row, "source_type", "record_entity_type", default="")
+                    },
+                    "access": {_value(row, "access_rule", "access_status", default="")},
+                    "review": {_value(row, "review_status", default="")},
+                    "box": {_value(row, "operational_box_id", default="")},
+                }
+                if any(
+                    selection and not (selection & orphan_values[name])
+                    for name, selection in selected.items()
+                ):
+                    continue
+                orphan_search_text = " ".join(
+                    str(value or "") for value in row.values() if value is not None
+                ).casefold()
+                if search and search not in orphan_search_text:
+                    continue
+            record = {
+                **source,
+                **row,
+                "source_id": source_id,
+                "_count_id": item_id,
+                "_parents": item_parents,
+                "_time_bin": item_time_bin,
+                "_item_name": _value(row, *name_fields),
+            }
+            heat_records.append(record)
+
+    heat_counts = Counter(
+        (parent, row["_time_bin"])
+        for row in heat_records
+        for parent in row["_parents"]
+        if parent in parent_axis
+    )
+    z = [[heat_counts[(parent, period)] for period in TIME_BINS] for parent in parent_axis]
+    products_by_source = defaultdict(set)
+    for product_index, product in enumerate(_entity_rows(inventory, "data_products")):
+        raw_source_id = _value(product, "source_id", default="")
+        source_id = inventory["source_aliases"].get(raw_source_id, raw_source_id)
+        products_by_source[source_id].add(
+            _value(product, "data_product_id", default=f"ROW_{product_index + 1}")
+        )
+    hover = []
+    for parent in parent_axis:
+        hover_row = []
+        for period in TIME_BINS:
+            cell_rows = [
+                row
+                for row in heat_records
+                if parent in row["_parents"] and row["_time_bin"] == period
+            ]
+            cell_source_ids = {row.get("source_id", "") for row in cell_rows}
+            family_ids = {
+                row.get("source_family_id", row.get("source_id"))
+                for row in documents
+                if row["source_id"] in cell_source_ids
+            }
+            product_count = sum(
+                len(products_by_source.get(source_id, set()))
+                for source_id in cell_source_ids
+            )
+            hover_row.append(
+                f"{parent}<br>{period}<br>{count_mode}: {heat_counts[(parent, period)]}"
+                f"<br>Distinct source families: {len(family_ids)}"
+                f"<br>Data products: {product_count}"
+            )
+        hover.append(hover_row)
+    maximum = max((max(line) for line in z), default=0)
+    display_time_bins = [
+        "2010-2014",
+        "2015-2019",
+        "2020-2022",
+        "2023-2026",
+        "Unknown observation time",
     ]
-    text = [[str(value) for value in line] for line in z]
-    colorscale = [
-        [0.0, "#17222C"],
-        [0.45, "#4B918C"],
-        [1.0, "#B58B48"],
-    ]
+    display_parent_axis = [_compact_parent_label(parent) for parent in parent_axis]
     fig = matrix(
-        TIME_BINS,
-        parent_axis,
+        display_time_bins,
+        display_parent_axis,
         z,
-        "Document count · observation time (publication time is separate)",
-        colorscale,
-        text=text,
+        f"{count_mode} by Layer A parent × observation time · RULE_DERIVED counts",
+        [[0.0, "#17222C"], [0.45, "#4B918C"], [1.0, "#B58B48"]],
+        text=[[str(value) for value in line] for line in z],
         hovertext=hover,
         zmax=max(maximum, 1),
     )
-    fig.update_traces(
-        hovertemplate="%{hovertext}<extra></extra>",
-        colorbar={"title": "Documents"},
+    fig.update_layout(
+        height=max(550, 44 * len(parent_axis) + 150),
+        margin={"l": 220, "r": 30, "t": 70, "b": 90},
     )
-    st.plotly_chart(fig, use_container_width=True, theme=None, key="v1_topic_heatmap")
+    fig.update_xaxes(tickangle=-15, automargin=True)
+    fig.update_traces(colorbar={"title": count_mode})
+    st.plotly_chart(fig, width="stretch", theme=None, key="v1_topic_heatmap")
     st.caption(
-        f"Distinct documentary items: {len(documents)} · distinct source families: "
-        f"{len({row['source_family'] for row in documents})} · distinct data products: "
-        f"{len({_value(row, 'data_product_id', default='') for row in [*inventory['raw']['data_products'][0], *inventory['raw']['data_products'][1]] if _value(row, 'data_product_id', default='')})}. "
-        "Multi-topic documents count once globally; parent counts may be non-additive. "
-        "Observation time only is used on X; missing/unclear times are in the final bin."
+        f"{count_mode}: {len({row['_count_id'] for row in heat_records})} unique entities shown. "
+        f"Documents: {len(documents)} · source families: "
+        f"{len({row['source_family'] for row in documents})} · data-product rows: "
+        f"{len(_entity_rows(inventory, 'data_products'))}. "
+        "Multi-topic records count once globally; parent totals may be non-additive. "
+        "Publication time is never substituted for observation time. The final time bin is "
+        "OBSERVATION_PERIOD_UNKNOWN."
     )
 
-    st.markdown("### Layer B box detail")
-    st.caption("Proposed boxes are shown as proposals only; they are not adopted taxonomy.")
+    with st.expander("Temporal density · known observation years only", expanded=False):
+        st.markdown(
+            "**What this visual means:** bars are RULE_DERIVED counts of documents with an "
+            "explicit observation year. Each topic has its own subplot; no smoothing or "
+            "interpolation occurs across nominal topic rows."
+        )
+        selected_years = []
+        for row in filtered_documents:
+            period = _year_range(_value(row, "observed_time", "observation_year", default=""))
+            if period:
+                selected_years.append((row, period))
+        trend_fig = make_subplots(
+            rows=len(parent_axis),
+            cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.012,
+            subplot_titles=parent_axis,
+        )
+        for row_index, parent in enumerate(parent_axis, start=1):
+            year_counts = Counter()
+            for document, year_range in selected_years:
+                if parent not in document["_parents"]:
+                    continue
+                for year in range(max(2010, year_range[0]), min(2026, year_range[1]) + 1):
+                    year_counts[year] += 1
+            years = list(range(2010, 2027))
+            counts_by_year = [year_counts[year] for year in years]
+            trend_fig.add_trace(
+                go.Bar(
+                    x=years,
+                    y=counts_by_year,
+                    marker_color="#4B918C",
+                    opacity=0.75,
+                    name=parent,
+                    showlegend=False,
+                    hovertemplate=f"{parent}<br>%{{x}}<br>Documents: %{{y}}<extra></extra>",
+                ),
+                row=row_index,
+                col=1,
+            )
+        trend_fig.update_layout(
+            paper_bgcolor="#0B1016",
+            plot_bgcolor="#0A1119",
+            font={"color": "#E8EEF2"},
+            height=max(420, len(parent_axis) * 90),
+            margin={"l": 20, "r": 20, "t": 55, "b": 30},
+            title="Observed-year document density · unknown-year documents excluded from curves",
+        )
+        trend_fig.update_xaxes(showgrid=True, gridcolor="#26333D", range=[2010, 2026])
+        trend_fig.update_yaxes(showgrid=True, gridcolor="#26333D", rangemode="tozero")
+        st.plotly_chart(trend_fig, width="stretch", theme=None, key="v1_temporal_density")
+        st.caption(
+            f"Known observation-year documents plotted: {len(selected_years)} · unknown "
+            f"observation-time documents remain in the heatmap's final bin: "
+            f"{sum(row['_time_bin'] == TIME_BINS[-1] for row in filtered_documents)}."
+        )
+
+    with st.expander("Semantic evidence landscape · TF-IDF + PCA", expanded=False):
+        st.markdown(
+            "**What this visual means:** document, measure, and claim text is transformed "
+            "with word-level TF-IDF and projected by deterministic PCA. Contours estimate "
+            "density only in this declared text-projection space. Positions are RULE_DERIVED, "
+            "not geography, time, or a directly interpretable measurement."
+        )
+        semantic_records = _semantic_projection(inventory)
+        coordinates = _tfidf_pca(semantic_records)
+        parent_palette = [
+            "#4B918C", "#B58B48", "#A34D42", "#4D78A8", "#9B70B3",
+            "#6A9B6F", "#C47D51", "#5A9CA5", "#9C8A56", "#7D7DAD",
+        ]
+        parent_colors = {
+            parent: parent_palette[index % len(parent_palette)]
+            for index, parent in enumerate(parents)
+        }
+        point_colors = [
+            "#E8EEF2"
+            if record["type"] == "CLAIM"
+            else parent_colors.get(record["parent"], "#454B50")
+            for record in semantic_records
+        ]
+        semantic_fig = go.Figure()
+        if semantic_records:
+            semantic_fig.add_trace(
+                go.Histogram2dContour(
+                    x=coordinates[:, 0],
+                    y=coordinates[:, 1],
+                    ncontours=8,
+                    colorscale=[[0, "#1B2A31"], [1, "#B58B48"]],
+                    opacity=0.35,
+                    showscale=False,
+                    hoverinfo="skip",
+                    contours={"coloring": "fill", "showlines": True},
+                    name="TF-IDF point density",
+                )
+            )
+            semantic_fig.add_trace(
+                go.Scatter(
+                    x=coordinates[:, 0],
+                    y=coordinates[:, 1],
+                    mode="markers",
+                    marker={
+                        "size": [
+                            12 if record["type"] == "DOCUMENT" else 9
+                            for record in semantic_records
+                        ],
+                        "color": point_colors,
+                        "line": {"color": "#E8EEF2", "width": 0.5},
+                        "opacity": 0.88,
+                    },
+                    customdata=[
+                        [
+                            record["type"],
+                            record["id"],
+                            record["title"],
+                            record["source_id"],
+                            record["url"],
+                            record["parent"],
+                        ]
+                        for record in semantic_records
+                    ],
+                    text=[record["title"] for record in semantic_records],
+                    hovertemplate=(
+                        "%{customdata[0]} · %{customdata[1]}<br>%{customdata[2]}"
+                        "<br>Source: %{customdata[3]}<br>Parent: %{customdata[5]}"
+                        "<br>%{customdata[4]}<extra>RULE_DERIVED TF-IDF/PCA</extra>"
+                    ),
+                    name="Evidence universe",
+                )
+            )
+        semantic_fig.update_layout(
+            paper_bgcolor="#0B1016",
+            plot_bgcolor="#0A1119",
+            font={"color": "#E8EEF2"},
+            height=690,
+            title="Text landscape · document / measure / claim points with density contours",
+            xaxis_title="Semantic dimension 1 · PCA",
+            yaxis_title="Semantic dimension 2 · PCA",
+            margin={"l": 40, "r": 20, "t": 60, "b": 45},
+        )
+        st.plotly_chart(
+            semantic_fig,
+            width="stretch",
+            theme=None,
+            key="v1_semantic_landscape",
+        )
+        st.caption(
+            f"Points: {len(semantic_records)} · documents {sum(r['type'] == 'DOCUMENT' for r in semantic_records)} · "
+            f"measures {sum(r['type'] != 'DOCUMENT' and r['type'] != 'CLAIM' for r in semantic_records)} · "
+            f"claims {sum(r['type'] == 'CLAIM' for r in semantic_records)}. "
+            "No external embedding service or new dependency is used."
+        )
+
+    st.markdown("### Layer B boxes and operational detail")
     box_rows = [
         row
-        for row in [*inventory["raw"]["concept_boxes"][0], *inventory["raw"]["concept_boxes"][1]]
+        for row in _entity_rows(inventory, "concept_boxes")
         if row.get("box_type") not in {"layer_a_parent", ""}
     ]
     if box_rows:
-        st.dataframe(
-            [
-                {
-                    key: _value(row, key)
-                    for key in (
-                        "operational_box_id",
-                        "box_title",
-                        "population",
-                        "substance",
-                        "observation_period",
-                        "outcome",
-                        "unit",
-                        "denominator",
-                        "geography",
-                        "method",
-                        "can_support",
-                        "cannot_support",
-                        "box_status",
-                        "review_status",
-                    )
-                }
-                for row in box_rows
-            ],
-            hide_index=True,
-            use_container_width=True,
-        )
+        st.dataframe(box_rows, hide_index=True, width="stretch")
     else:
-        st.info("No Layer B box rows are available in the loaded CSV inventory.")
+        st.info("No operational boxes were loaded.")
 
-    st.markdown("### Documentary item provenance")
+    st.markdown("### Documentary provenance · full visible universe")
     detail_rows = []
-    for row in documents:
+    for row in filtered_documents:
         detail_rows.append(
             {
                 "source_id": row["source_id"],
@@ -728,164 +1786,453 @@ def render_view_a(inventory):
                 "original age": _value(row, "original_age", "original_age_group"),
                 "geography": _value(row, "geography_level", "geographic_level"),
                 "substance": _value(row, "substance"),
-                "source type": _value(row, "source_type"),
+                "source type": _value(row, "source_type", "record_entity_type"),
                 "access": _value(row, "access_rule", "access_status"),
                 "review status": _value(row, "review_status"),
                 "source family": row["source_family"],
-                "duplicate source IDs": "; ".join(
-                    duplicate["duplicate_source_id"]
-                    for duplicate in inventory["duplicate_sources"]
-                    if duplicate["retained_source_id"] == row["source_id"]
-                )
-                or "None",
                 "data products": sum(
                     1
-                    for product in [
-                        *inventory["raw"]["data_products"][0],
-                        *inventory["raw"]["data_products"][1],
-                    ]
+                    for product in _entity_rows(inventory, "data_products")
                     if product.get("source_id") == row["source_id"]
                 ),
             }
         )
-    st.dataframe(detail_rows, hide_index=True, use_container_width=True)
+    st.dataframe(
+        detail_rows,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "URL/DOI": st.column_config.LinkColumn(
+                "URL/DOI", display_text="Open source"
+            )
+        },
+    )
+
+    all_layer_names = {
+        "Data products": "data_products",
+        "Indicators": "indicators",
+        "Variables": "variables",
+        "Observations": "observations",
+        "Gap claims": "gap_claims",
+        "Alignments": "alignments",
+        "Barriers": "barriers",
+        "Search runs": "search_runs",
+        "Search candidates": "search_candidates",
+        "Mappings": "mapping",
+    }
+    counts = [
+        {
+            "entity layer": label,
+            "seed rows": len(inventory["raw"][entity][0]),
+            "candidate rows": len(inventory["raw"][entity][1]),
+            "total rows": sum(len(rows) for rows in inventory["raw"][entity]),
+        }
+        for label, entity in all_layer_names.items()
+    ]
+    st.markdown("### Linked evidence layers · separate entity levels")
+    st.dataframe(counts, hide_index=True, width="stretch")
+    layer_choice = st.selectbox(
+        "Inspect raw linked layer",
+        tuple(all_layer_names),
+        key="v1_raw_layer_choice",
+    )
+    raw_layer = all_layer_names[layer_choice]
+    st.dataframe(
+        _entity_rows(inventory, raw_layer),
+        hide_index=True,
+        width="stretch",
+    )
+    if inventory["duplicate_sources"]:
+        with st.expander(f"Exact source duplicates retained in audit trail ({len(inventory['duplicate_sources'])})"):
+            st.dataframe(
+                inventory["duplicate_sources"],
+                hide_index=True,
+                width="stretch",
+            )
+    if inventory["unparsed_rows"]:
+        with st.expander(f"Raw rows with extra CSV fields ({len(inventory['unparsed_rows'])})"):
+            st.dataframe(
+                inventory["unparsed_rows"],
+                hide_index=True,
+                width="stretch",
+            )
 
 
 def render_view_b(inventory):
     st.markdown("# View B · Claim & Measure Audit")
     st.markdown(
-        "Every cell is either an exact stored alignment class or the display-only neutral state NOT_ASSESSED."
+        "Complete exploratory claim × measure matrix. Relevance is a calculated navigation "
+        "layer; stored assessment classes remain a separate, provenance-backed layer."
     )
     _fixed_method_content()
-    claims = _claims(inventory)
-    measures = _measure_records(inventory)
+    all_claims = _claims(inventory)
+    all_measures = _measure_records(inventory)
     alignment_rows, alignment_lookup = _alignment_lookup(inventory)
-    measure_ids = []
-    for measure in measures:
-        ids = {
-            measure.get("_measure_key", ""),
-            measure.get("variable_id", ""),
-            measure.get("indicator_id", ""),
-            measure.get("indicator_code", ""),
-            measure.get("variable_name", ""),
+    parents, parent_assignments = _source_parent_assignments(inventory)
+
+    st.markdown("### Matrix controls")
+    control_columns = st.columns(3)
+    claim_search = control_columns[0].text_input(
+        "Search claims", key="v1_claim_search"
+    ).casefold()
+    measure_search = control_columns[1].text_input(
+        "Search measures / sources", key="v1_measure_search"
+    ).casefold()
+    display_layer = control_columns[2].selectbox(
+        "Cell fill",
+        ("Exploratory relevance R", "Stored alignment class"),
+        key="v1_matrix_layer",
+    )
+    filter_columns = st.columns(3)
+    selected_parents = filter_columns[0].multiselect(
+        "Filter Layer A parents",
+        [*parents, "UNMAPPED / REVIEW_REQUIRED"],
+        key="v1_matrix_parent_filter",
+    )
+    selected_measure_types = filter_columns[1].multiselect(
+        "Measure entity type",
+        ("INDICATOR", "VARIABLE", "OBSERVATION"),
+        key="v1_matrix_type_filter",
+    )
+    selected_claim_status = filter_columns[2].multiselect(
+        "Claim provenance",
+        sorted({claim["status"] for claim in all_claims}),
+        key="v1_matrix_claim_status",
+    )
+
+    claims = [
+        claim
+        for claim in all_claims
+        if (not claim_search or claim_search in f"{claim['label']} {claim.get('description', '')}".casefold())
+        and (not selected_claim_status or claim["status"] in selected_claim_status)
+    ]
+    measures = []
+    for measure in all_measures:
+        source = _source_record(inventory, measure.get("source_id", ""))
+        measure_parents = parent_assignments.get(measure.get("source_id", "")) or {
+            "UNMAPPED / REVIEW_REQUIRED"
         }
-        measure_ids.append({value for value in ids if value})
+        searchable = " ".join(
+            [
+                measure["_measure_label"],
+                measure["_definition"],
+                _value(source, "source_id"),
+                _value(source, "title"),
+                _value(measure, "substance"),
+            ]
+        ).casefold()
+        if measure_search and measure_search not in searchable:
+            continue
+        if selected_parents and not (set(selected_parents) & measure_parents):
+            continue
+        if selected_measure_types and measure["_measure_type"] not in selected_measure_types:
+            continue
+        measures.append(measure)
+
+    st.caption(
+        f"Visible matrix: {len(claims)} claims × {len(measures)} measures = "
+        f"{len(claims) * len(measures)} cells. Empty filters include the full universe."
+    )
+    if not claims or not measures:
+        st.info("No rows match the active filters; clear searches or selections to show all.")
+        return
 
     states = []
+    scores = []
+    coverages = []
     hover = []
+    state_counts = Counter()
+    component_rows = []
     for claim in claims:
         state_row = []
+        score_row = []
+        coverage_row = []
         hover_row = []
-        for measure, ids in zip(measures, measure_ids):
+        for measure in measures:
+            measure_ids = {
+                measure.get("_measure_id", ""),
+                measure.get("_measure_key", ""),
+                measure.get("variable_id", ""),
+                measure.get("indicator_id", ""),
+                measure.get("indicator_code", ""),
+                measure.get("variable_name", ""),
+            }
+            measure_ids.discard("")
             stored = []
             for claim_id in claim["match_ids"]:
-                for observed_id in ids:
+                for observed_id in measure_ids:
                     stored.extend(alignment_lookup.get((claim_id, observed_id), []))
             stored = list({id(row): row for row in stored}.values())
-            alignment = stored[0] if stored else None
-            state = _value(alignment, "relationship_class") if alignment else "NOT_ASSESSED"
+            stored_classes = sorted(
+                {
+                    _value(row, "relationship_class")
+                    for row in stored
+                    if _value(row, "relationship_class")
+                    in {*ALIGNMENT_CLASSES, "NOT_APPLICABLE"}
+                }
+            )
+            if not stored_classes:
+                state = "NOT_ASSESSED"
+            elif len(stored_classes) == 1:
+                state = stored_classes[0]
+            else:
+                state = "MULTIPLE_STORED"
             state_row.append(state)
+            state_counts.update(stored_classes if stored_classes else [state])
             source = _source_record(inventory, measure.get("source_id", ""))
+            components = _relevance_components(
+                claim,
+                measure,
+                source,
+                parent_assignments,
+            )
+            score, coverage = _relevance_score(components)
+            score_row.append(score)
+            coverage_row.append(coverage)
+            component_rows.append(
+                {
+                    "claim": claim["id"],
+                    "measure": measure["_measure_key"],
+                    "source_id": _value(source, "source_id"),
+                    "R": score,
+                    "coverage C": coverage,
+                    **{
+                        name: "UNKNOWN" if value is None else f"{value:.3f}"
+                        for name, value in components.items()
+                    },
+                    "stored class": " / ".join(stored_classes) or "NOT_ASSESSED",
+                }
+            )
+            component_text = "<br>".join(
+                f"{name}: {'UNKNOWN' if value is None else f'{value:.2f}'}"
+                for name, value in components.items()
+            )
+            reason_text = "; ".join(
+                sorted(
+                    {
+                        _value(row, "relationship_reason")
+                        for row in stored
+                    }
+                )
+            ) or "No stored alignment row"
+            evidence_text = "; ".join(
+                sorted(
+                    {
+                        _value(row, "evidence_reference")
+                        for row in stored
+                    }
+                )
+            ) or "UNKNOWN"
+            loss_text = "; ".join(
+                sorted({_value(row, "measurement_loss") for row in stored})
+            ) or "UNKNOWN"
+            limitation_text = "; ".join(
+                sorted(
+                    {_value(row, "identification_limitation") for row in stored}
+                )
+            ) or "UNKNOWN"
+            stored_statuses = "; ".join(
+                sorted({_value(row, "review_status") for row in stored})
+            ) or _value(measure, "review_status")
             hover_row.append(
                 "<br>".join(
                     [
-                        f"State: {state}",
-                        f"Variable: {_value(measure, 'variable_name')}",
-                        f"Definition: {_value(measure, 'variable_definition', 'definition_verbatim')}",
+                        f"Claim: {claim['label']}",
+                        f"Claim provenance: {claim['status']}",
+                        f"Measure: {measure['_measure_label']}",
+                        f"Definition: {measure['_definition']}",
                         f"Source: {_value(source, 'title')} ({_value(source, 'source_id')})",
-                        f"Time: {_value(measure, 'observed_time', 'observation_year')} / publication: {_value(measure, 'publication_time', 'publication_year')}",
+                        f"URL/DOI: {_value(source, 'source_url_or_doi')}",
+                        f"Observation time: {_value(measure, 'observed_time', 'observation_period', 'observation_year')}",
+                        f"Publication time: {_value(measure, 'publication_time', 'publication_year')}",
                         f"Age: {_value(measure, 'original_age', 'original_age_group')}",
                         f"Geography: {_value(measure, 'geography_level', 'geographic_level')}",
                         f"Unit: {_value(measure, 'unit')}",
                         f"Denominator: {_value(measure, 'denominator')}",
-                        f"Reason: {_value(alignment, 'relationship_reason') if alignment else 'No stored alignment row'}",
-                        f"Measurement loss: {_value(alignment, 'measurement_loss') if alignment else 'UNKNOWN'}",
-                        f"Identification limitation: {_value(alignment, 'identification_limitation') if alignment else 'UNKNOWN'}",
-                        f"Review status: {_value(alignment, 'review_status') if alignment else _value(measure, 'review_status')}",
+                        f"R: {'UNKNOWN' if score is None else f'{score:.3f}'} · coverage C: {coverage:.3f}",
+                        component_text,
+                        f"Stored class: {' / '.join(stored_classes) or 'NOT_ASSESSED (display-only)'}",
+                        f"Reason(s): {reason_text}",
+                        f"Evidence reference(s): {evidence_text}",
+                        f"Measurement loss: {loss_text}",
+                        f"Identification limitation: {limitation_text}",
+                        f"Review status: {stored_statuses}",
+                        "R is RULE_DERIVED exploratory relevance, never a stored or human-approved alignment.",
                     ]
                 )
             )
         states.append(state_row)
+        scores.append(score_row)
+        coverages.append(coverage_row)
         hover.append(hover_row)
-    state_names = [*ALIGNMENT_CLASSES, "NOT_ASSESSED", "NOT_APPLICABLE"]
-    state_index = {state: index for index, state in enumerate(state_names)}
-    z = [[state_index.get(state, state_index["NOT_ASSESSED"]) for state in row] for row in states]
+
     labels_x = [measure["_measure_key"] for measure in measures]
-    labels_y = [claim["label"] for claim in claims]
-    display_text = [list(row) for row in states]
-    if measures:
+    labels_y = [claim["id"] for claim in claims]
+    if display_layer == "Exploratory relevance R":
+        relevance_values = [
+            [-1 if score is None else score for score in row]
+            for row in scores
+        ]
         fig = matrix(
             labels_x,
             labels_y,
-            z,
-            "Research claim × observed measure · stored relationships only",
+            relevance_values,
+            "Exploratory relevance R · RULE_DERIVED, not evidence fit",
+            [
+                [0.0, "#454B50"],
+                [0.249, "#454B50"],
+                [0.25, "#26333D"],
+                [0.55, "#4B918C"],
+                [0.8, "#B58B48"],
+                [1.0, "#A34D42"],
+            ],
+            hovertext=hover,
+            zmax=1,
+        )
+        fig.update_traces(
+            zmin=-1,
+            zmax=1,
+            showscale=True,
+            colorbar={
+                "title": "R score<br>UNKNOWN at -1",
+                "tickvals": [-1, 0, 0.5, 1],
+                "ticktext": ["UNKNOWN", "0", "0.5", "1"],
+            },
+        )
+    else:
+        state_names = [
+            *ALIGNMENT_CLASSES,
+            "NOT_APPLICABLE",
+            "NOT_ASSESSED",
+            "MULTIPLE_STORED",
+        ]
+        state_index = {state: index for index, state in enumerate(state_names)}
+        state_values = [
+            [state_index.get(state, state_index["NOT_ASSESSED"]) for state in row]
+            for row in states
+        ]
+        fig = matrix(
+            labels_x,
+            labels_y,
+            state_values,
+            "Stored alignment classes · NOT_ASSESSED is display-only",
             categorical_scale(state_names, DISPLAY_COLORS),
-            text=display_text,
+            text=states,
             hovertext=hover,
             zmax=len(state_names) - 1,
         )
-        fig.update_layout(height=max(560, min(900, 42 * len(claims) + 200)))
-        st.plotly_chart(fig, use_container_width=True, theme=None, key="v1_claim_measure_matrix")
-    else:
-        st.info("No measured variables were loaded; no measure columns have been fabricated.")
-
-    cell_counts = Counter(state for row in states for state in row)
-    stored_counts = Counter(
-        state for row in states for state in row if state in ALIGNMENT_CLASSES
+    fig.update_layout(
+        height=max(620, min(1250, 38 * len(claims) + 250)),
+        margin={"l": 150, "r": 35, "t": 65, "b": 230},
+    )
+    fig.update_xaxes(tickangle=-60, automargin=True, tickfont={"size": 9})
+    fig.update_yaxes(automargin=True, tickfont={"size": 10})
+    st.plotly_chart(
+        fig,
+        width="stretch",
+        theme=None,
+        key="v1_claim_measure_matrix",
     )
     st.caption(
-        f"Claims: {len(claims)} · measures: {len(measures)} · claim × measure cells: "
-        f"{len(claims) * len(measures)} · stored-class cells: {sum(stored_counts.values())} · "
-        f"NOT_ASSESSED: {cell_counts['NOT_ASSESSED']} · NOT_APPLICABLE: {cell_counts['NOT_APPLICABLE']}. "
-        "NOT_ASSESSED is display-only and is never written as an alignment."
+        "Exploratory relevance ≠ direct evidence fit. A high R does not create, promote, or "
+        "substitute for a stored alignment. UNKNOWN components reduce coverage rather than "
+        "excluding a cell."
     )
-    st.markdown("### Stored class / display-state counts")
+
+    total_cells = len(claims) * len(measures)
+    stored_cell_count = sum(
+        state not in {"NOT_ASSESSED", "MULTIPLE_STORED"}
+        for row in states
+        for state in row
+    ) + sum(state == "MULTIPLE_STORED" for row in states for state in row)
+    state_cell_counts = Counter(state for row in states for state in row)
+    st.markdown("### Matrix and stored-state counts")
+    metrics = st.columns(5)
+    for column, label, value in zip(
+        metrics,
+        ("Claims", "Measures", "All cells", "Cells with stored class", "NOT_ASSESSED"),
+        (
+            len(claims),
+            len(measures),
+            total_cells,
+            stored_cell_count,
+            state_cell_counts["NOT_ASSESSED"],
+        ),
+    ):
+        column.metric(label, value)
     st.dataframe(
         [
-            {"state": state, "display cells": cell_counts[state]}
-            for state in [*ALIGNMENT_CLASSES, "NOT_ASSESSED", "NOT_APPLICABLE"]
+            {
+                "state": state,
+                "display cells": state_cell_counts[state],
+                "definition": (
+                    "Display-only neutral state; no stored alignment row"
+                    if state == "NOT_ASSESSED"
+                    else "Multiple distinct stored classes matched; inspect cell provenance"
+                    if state == "MULTIPLE_STORED"
+                    else "Exact stored class; not altered by exploratory R"
+                ),
+            }
+            for state in [
+                *ALIGNMENT_CLASSES,
+                "NOT_APPLICABLE",
+                "NOT_ASSESSED",
+                "MULTIPLE_STORED",
+            ]
         ],
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
     )
-    st.markdown("### Grouped measure lineage")
-    parents, parent_assignments = _source_parent_assignments(inventory)
-    grouped_measures = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
-    for measure in measures:
-        source_id = measure.get("source_id", "")
-        assigned_parents = parent_assignments.get(source_id) or {
-            "UNMAPPED / REVIEW_REQUIRED"
-        }
-        for parent in assigned_parents:
-            grouped_measures[parent][source_id][
-                (measure["_product_id"], measure["_product_name"])
-            ].append(measure)
-    for parent in [*parents, "UNMAPPED / REVIEW_REQUIRED"]:
-        source_groups = grouped_measures.get(parent, {})
-        with st.expander(f"{parent} · {sum(len(rows) for products in source_groups.values() for rows in products.values())} measures"):
-            for source_id, product_groups in sorted(source_groups.items()):
-                source = _source_record(inventory, source_id)
-                with st.expander(f"{source_id} · {_value(source, 'title')}"):
-                    for (product_id, product_name), product_measures in sorted(
-                        product_groups.items()
-                    ):
-                        st.markdown(f"**{product_id} · {product_name}**")
-                        st.dataframe(
-                            [
-                                {
-                                    "indicator": _value(measure, "indicator_id", "indicator_code"),
-                                    "variable_id": measure["_measure_key"],
-                                    "variable": _value(measure, "variable_name"),
-                                    "definition": _value(measure, "variable_definition"),
-                                    "observation rows": measure["_observation_count"],
-                                    "observation detail": measure["_observation_details"],
-                                    "review status": _value(measure, "review_status"),
-                                }
-                                for measure in product_measures
-                            ],
-                            hide_index=True,
-                            use_container_width=True,
-                        )
+    st.markdown("### Every cell · relevance components and provenance")
+    st.dataframe(
+        component_rows,
+        hide_index=True,
+        width="stretch",
+    )
+
+    st.markdown("### Complete claim inventory")
+    st.dataframe(
+        [
+            {
+                "claim_id": claim["id"],
+                "claim": claim["label"],
+                "definition": claim.get("description", "UNKNOWN"),
+                "provenance": claim["status"],
+                "source_id": claim.get("source_id", "UNKNOWN"),
+            }
+            for claim in claims
+        ],
+        hide_index=True,
+        width="stretch",
+    )
+
+    st.markdown("### Grouped measure lineage · Layer A → source → product")
+    st.dataframe(
+        [
+            {
+                "Layer A parent": "; ".join(
+                    sorted(
+                        parent_assignments.get(measure.get("source_id", ""), set())
+                    )
+                )
+                or "UNMAPPED / REVIEW_REQUIRED",
+                "source_id": _value(_source_record(inventory, measure.get("source_id", "")), "source_id"),
+                "source": _value(_source_record(inventory, measure.get("source_id", "")), "title"),
+                "data_product_id": measure["_product_id"],
+                "data product": measure["_product_name"],
+                "measure type": measure["_measure_type"],
+                "measure_id": measure["_measure_id"],
+                "measure": measure["_measure_label"],
+                "definition": measure["_definition"],
+                "observations": measure["_observation_count"],
+                "observation detail": measure["_observation_details"],
+                "review status": _value(measure, "review_status"),
+            }
+            for measure in measures
+        ],
+        hide_index=True,
+        width="stretch",
+    )
 
     measured_source_ids = {row.get("source_id") for row in measures}
     contextual = [
@@ -893,8 +2240,10 @@ def render_view_b(inventory):
         for row in inventory["sources"]
         if row.get("source_id") not in measured_source_ids
     ]
-    st.markdown("### Contextual documents · no observed variable linked")
-    st.caption("These remain documentary context and are not represented as observed-variable columns.")
+    st.markdown("### Contextual documents · no measure linked")
+    st.caption(
+        "Documents remain visible as context and are not fabricated into observed-variable columns."
+    )
     st.dataframe(
         [
             {
@@ -908,7 +2257,7 @@ def render_view_b(inventory):
             for row in contextual
         ],
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
     )
     st.markdown("### Literal interpretation guardrails")
     for guardrail in (
@@ -925,7 +2274,8 @@ def render_view_b(inventory):
 def render_view_c(inventory):
     st.markdown("# View C · Data Production Flow")
     st.markdown(
-        "Table-first production roles and evidence references. Role labels are kept separate; UNKNOWN is not inferred."
+        "Production relationships are drawn from explicit lineage and role fields. Unknown "
+        "roles do not hide products or suppress independently documented edges."
     )
     _fixed_method_content()
     rows = _product_records(inventory)
@@ -933,13 +2283,359 @@ def render_view_c(inventory):
     st.dataframe(
         rows,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         column_config={
             "source_link": st.column_config.LinkColumn(
                 "source link", display_text="Open source"
             )
         },
     )
-    st.info(
-        "No diagram is drawn: the loaded records do not supply a complete documented relation type plus evidence reference for every proposed edge. Unknown relations remain UNKNOWN; no arrows or production chain are inferred."
+    st.markdown("### Evidence production network")
+    st.markdown(
+        "**What this visual means:** layout is a deterministic force-directed graph "
+        "(seed 2026), not geographic. Arrows are explicit source/product/measure foreign-key "
+        "lineage or source-recorded production roles; each edge tooltip includes its evidence "
+        "reference. Unknown roles are shown as disconnected badges, never as inferred edges."
+    )
+    graph_controls = st.columns(2)
+    edge_mode = graph_controls[0].selectbox(
+        "Relationship layer",
+        ("Documented only", "Include MODEL_SUGGESTED relationships"),
+        key="v1_flow_edge_mode",
+    )
+    show_unknown = graph_controls[1].checkbox(
+        "Show UNKNOWN role slots",
+        value=True,
+        key="v1_flow_unknown_roles",
+    )
+
+    graph = nx.DiGraph()
+    node_details = {}
+    source_by_id = {row.get("source_id", ""): row for row in inventory["sources"]}
+    source_products = defaultdict(list)
+    product_nodes = {}
+    source_nodes = {}
+    edge_records = []
+    role_types = {
+        "funder": "funded_by",
+        "collector": "collected_by",
+        "producer": "produced_by",
+        "indicator_authority": "indicator_defined_by",
+        "custodian": "held_by/custodied_by",
+        "reported_to": "reported_to",
+        "access_authority": "accessible_through",
+    }
+
+    def add_node(node_id, kind, label, details, color):
+        graph.add_node(node_id, kind=kind)
+        node_details[node_id] = {
+            "kind": kind,
+            "label": label,
+            "details": details,
+            "color": color,
+        }
+
+    def add_edge(from_id, to_id, relation, reference, provenance="OBSERVED"):
+        if not reference or _is_unknown(reference):
+            return
+        edge = {
+            "from": from_id,
+            "to": to_id,
+            "relation": relation,
+            "reference": reference,
+            "provenance": provenance,
+        }
+        edge_records.append(edge)
+        graph.add_edge(from_id, to_id, relation=relation, provenance=provenance)
+
+    for source in inventory["sources"]:
+        source_id = _value(source, "source_id")
+        node_id = f"source:{source_id}"
+        source_nodes[source_id] = node_id
+        add_node(
+            node_id,
+            "Source document",
+            source_id,
+            f"{_value(source, 'title')}<br>{_value(source, 'source_url_or_doi')}",
+            "#4B918C",
+        )
+
+    actual_products = _entity_rows(inventory, "data_products")
+    for product in actual_products:
+        source_id = _value(product, "source_id", default="")
+        canonical_source_id = inventory["source_aliases"].get(source_id, source_id)
+        product_id = _value(product, "data_product_id", default="")
+        if not product_id:
+            continue
+        node_id = f"product:{canonical_source_id}:{product_id}"
+        product_nodes[(canonical_source_id, product_id)] = node_id
+        source_products[canonical_source_id].append(node_id)
+        source = source_by_id.get(canonical_source_id, {})
+        add_node(
+            node_id,
+            "Data product",
+            product_id,
+            f"{_value(product, 'data_product_name', 'title')}<br>Source: {canonical_source_id}",
+            "#B58B48",
+        )
+        source_node = source_nodes.get(canonical_source_id)
+        if source_node:
+            add_edge(
+                source_node,
+                node_id,
+                "source_has_data_product",
+                _value(source, "source_url_or_doi"),
+            )
+
+    for entity, kind, id_fields, name_fields, color in (
+        ("indicators", "Indicator", ("indicator_id", "indicator_code"), ("indicator_name", "indicator_code"), "#7594B8"),
+        ("variables", "Variable", ("variable_id",), ("variable_name",), "#9B70B3"),
+    ):
+        for index, row in enumerate(_entity_rows(inventory, entity)):
+            source_id = _value(row, "source_id", default="")
+            source_id = inventory["source_aliases"].get(source_id, source_id)
+            item_id = _value(row, *id_fields, default="") or f"ROW_{index + 1}"
+            node_id = f"{kind.casefold()}:{source_id}:{item_id}"
+            label = _value(row, *id_fields, default=item_id)
+            add_node(
+                node_id,
+                kind,
+                label,
+                f"{_value(row, *name_fields)}<br>Source: {source_id}<br>"
+                f"Definition: {_value(row, 'variable_definition', 'indicator_definition', 'definition_verbatim')}",
+                color,
+            )
+            matching_product_id = _value(row, "data_product_id", default="")
+            matching_product = product_nodes.get((source_id, matching_product_id))
+            if not matching_product and len(source_products.get(source_id, [])) == 1:
+                matching_product = source_products[source_id][0]
+            reference = _value(
+                row,
+                "source_url_or_doi",
+                default=_value(source_by_id.get(source_id, {}), "source_url_or_doi"),
+            )
+            parent_node = matching_product or source_nodes.get(source_id)
+            if parent_node:
+                add_edge(
+                    parent_node,
+                    node_id,
+                    "data_product_has_measure" if matching_product else "source_documents_measure",
+                    reference,
+                )
+
+    variable_nodes = {}
+    for node_id, details in node_details.items():
+        if details["kind"] == "Variable":
+            variable_nodes[node_id.split(":", 1)[1]] = node_id
+    for index, observation in enumerate(_entity_rows(inventory, "observations")):
+        source_id = _value(observation, "source_id", default="")
+        source_id = inventory["source_aliases"].get(source_id, source_id)
+        observation_id = _value(observation, "observation_id", default=f"ROW_{index + 1}")
+        variable_id = _value(observation, "variable_id", default="")
+        node_id = f"observation:{source_id}:{observation_id}"
+        add_node(
+            node_id,
+            "Observation",
+            observation_id,
+            f"Variable: {variable_id or 'UNKNOWN'}<br>"
+            f"Value: {_value(observation, 'value')}<br>"
+            f"Time: {_value(observation, 'observed_time', 'observation_period')}<br>"
+            f"Unit: {_value(observation, 'unit')}<br>"
+            f"Geography: {_value(observation, 'geography_level', 'geographic_level')}",
+            "#D17A5B",
+        )
+        parent_node = variable_nodes.get(f"{source_id}:{variable_id}") if variable_id else None
+        if not parent_node:
+            parent_node = source_nodes.get(source_id)
+        if parent_node:
+            source = source_by_id.get(source_id, {})
+            add_edge(
+                parent_node,
+                node_id,
+                "variable_has_observation" if variable_id else "source_has_observation",
+                _value(observation, "source_url_or_doi", default=_value(source, "source_url_or_doi")),
+            )
+
+    unknown_nodes = []
+    for row in rows:
+        source_id = inventory["source_aliases"].get(row["source_id"], row["source_id"])
+        product_id = row["data_product_id"]
+        product_node = product_nodes.get((source_id, product_id))
+        target_node = product_node or source_nodes.get(source_id)
+        if not target_node:
+            continue
+        for role, relation in role_types.items():
+            actor_name = row.get(role, "UNKNOWN")
+            if _is_unknown(actor_name):
+                if show_unknown:
+                    unknown_id = f"unknown:{target_node}:{role}"
+                    if unknown_id not in node_details:
+                        add_node(
+                            unknown_id,
+                            "UNKNOWN role slot",
+                            f"UNKNOWN · {role}",
+                            f"Role is not documented for {product_id}; no edge is drawn.",
+                            "#454B50",
+                        )
+                        unknown_nodes.append(unknown_id)
+                continue
+            actor_id = f"actor:{role}:{actor_name}"
+            if actor_id not in node_details:
+                add_node(
+                    actor_id,
+                    f"Actor · {role}",
+                    actor_name,
+                    f"Role: {role}<br>Explicitly recorded in the source/data-production row.",
+                    "#D2A95F",
+                )
+            source = source_by_id.get(source_id, {})
+            evidence_reference = row.get("evidence_reference", "UNKNOWN")
+            if _is_unknown(evidence_reference):
+                evidence_reference = _value(source, "source_url_or_doi", default="")
+            add_edge(
+                actor_id,
+                target_node,
+                relation,
+                evidence_reference,
+            )
+
+    documented_count = sum(edge["provenance"] == "OBSERVED" for edge in edge_records)
+    suggested_count = sum(edge["provenance"] == "MODEL_SUGGESTED" for edge in edge_records)
+    if edge_mode == "Documented only":
+        visible_edges = [edge for edge in edge_records if edge["provenance"] == "OBSERVED"]
+    else:
+        visible_edges = edge_records
+        st.info(
+            f"No MODEL_SUGGESTED production-role edges are stored in the loaded candidate data "
+            f"({suggested_count}); no role edges are inferred. Showing all {documented_count} documented edges."
+        )
+    st.caption(
+        f"Nodes: {graph.number_of_nodes()} · documented edges: {documented_count} · "
+        f"model-suggested edges in input: {suggested_count} · unknown role slots: {len(unknown_nodes)}."
+    )
+    if graph.number_of_nodes():
+        positions = _spring_layout_coordinates(
+            tuple(graph.nodes),
+            tuple(graph.edges),
+        )
+        figure = go.Figure()
+        edge_palette = {
+            "source_has_data_product": "#4B918C",
+            "data_product_has_measure": "#B58B48",
+            "source_documents_measure": "#7594B8",
+            "variable_has_observation": "#D17A5B",
+            "source_has_observation": "#D17A5B",
+            "funded_by": "#D2A95F",
+            "collected_by": "#9B70B3",
+            "produced_by": "#6A9B6F",
+            "indicator_defined_by": "#4D78A8",
+            "held_by/custodied_by": "#A34D42",
+            "reported_to": "#5A9CA5",
+            "accessible_through": "#9C8A56",
+        }
+        for relation in sorted({edge["relation"] for edge in visible_edges}):
+            relation_edges = [edge for edge in visible_edges if edge["relation"] == relation]
+            for edge in relation_edges:
+                x0, y0 = positions[edge["from"]]
+                x1, y1 = positions[edge["to"]]
+                figure.add_trace(
+                    go.Scatter(
+                        x=[x0, x1],
+                        y=[y0, y1],
+                        mode="lines",
+                        line={"color": edge_palette.get(relation, "#68717A"), "width": 1.4},
+                        text=[
+                            f"{relation}<br>{edge['provenance']}<br>Evidence: {edge['reference']}"
+                        ] * 2,
+                        hovertemplate="%{text}<extra></extra>",
+                        showlegend=False,
+                        name=relation,
+                    )
+                )
+                figure.add_annotation(
+                    x=x1,
+                    y=y1,
+                    ax=x0,
+                    ay=y0,
+                    xref="x",
+                    yref="y",
+                    axref="x",
+                    ayref="y",
+                    showarrow=True,
+                    arrowhead=2,
+                    arrowsize=0.8,
+                    arrowwidth=1,
+                    arrowcolor=edge_palette.get(relation, "#68717A"),
+                    opacity=0.65,
+                )
+        node_types = sorted({details["kind"] for details in node_details.values()})
+        for node_type in node_types:
+            node_ids = [
+                node_id
+                for node_id, details in node_details.items()
+                if details["kind"] == node_type
+            ]
+            figure.add_trace(
+                go.Scatter(
+                    x=[positions[node_id][0] for node_id in node_ids],
+                    y=[positions[node_id][1] for node_id in node_ids],
+                    mode="markers+text",
+                    text=[node_details[node_id]["label"] for node_id in node_ids],
+                    textposition="top center",
+                    textfont={"size": 8},
+                    marker={
+                        "size": 12 if node_type != "UNKNOWN role slot" else 8,
+                        "color": node_details[node_ids[0]]["color"],
+                        "line": {"color": "#E8EEF2", "width": 0.6},
+                    },
+                    customdata=[
+                        [
+                            node_type,
+                            node_details[node_id]["label"],
+                            node_details[node_id]["details"],
+                        ]
+                        for node_id in node_ids
+                    ],
+                    hovertemplate=(
+                        "%{customdata[0]} · %{customdata[1]}<br>%{customdata[2]}"
+                        "<extra>Graph node</extra>"
+                    ),
+                    name=node_type,
+                )
+            )
+        figure.update_layout(
+            paper_bgcolor="#0B1016",
+            plot_bgcolor="#0A1119",
+            font={"color": "#E8EEF2"},
+            height=950,
+            title="Evidence lineage and production roles · layout coordinates are not geography",
+            margin={"l": 10, "r": 10, "t": 55, "b": 10},
+            legend={"orientation": "h", "y": -0.02},
+            xaxis={"visible": False, "showgrid": False, "zeroline": False},
+            yaxis={"visible": False, "showgrid": False, "zeroline": False},
+            hovermode="closest",
+        )
+        st.plotly_chart(
+            figure,
+            width="stretch",
+            theme=None,
+            key="v1_production_network",
+        )
+    else:
+        st.info("No source, product, or lineage nodes were loaded.")
+
+    st.markdown("### Edge provenance")
+    st.dataframe(
+        [
+            {
+                "from": node_details[edge["from"]]["label"],
+                "to": node_details[edge["to"]]["label"],
+                "relationship type": edge["relation"],
+                "provenance": edge["provenance"],
+                "evidence reference": edge["reference"],
+            }
+            for edge in visible_edges
+        ],
+        hide_index=True,
+        width="stretch",
     )

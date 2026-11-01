@@ -2,6 +2,8 @@
 
 **Build:** one-time graph build, 2026-10-31
 
+> **Historical snapshot:** this audit describes the earlier review-gated V1 graph build. The current maximal-visibility exploratory implementation and its updated counts are documented in [exploratory_atlas_build.md](./exploratory_atlas_build.md).
+
 **Review boundary:** display and counting only. Human assessment and approval are deferred to a later run after the user says the graph looks OK. Nothing was approved, promoted, or written to the approved database or tensor.
 
 ## Navigation
