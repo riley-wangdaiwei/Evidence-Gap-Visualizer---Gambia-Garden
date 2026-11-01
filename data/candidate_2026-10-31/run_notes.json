@@ -1,0 +1,75 @@
+{
+  "run_date": "2026-10-31",
+  "candidate_counts": {
+    "sources": 5,
+    "data_products": 3,
+    "indicators": 7,
+    "variables": 58,
+    "observations": 15,
+    "alignments": 15,
+    "gap_claims": 1,
+    "barriers": 3,
+    "data_production_audit": 5,
+    "search_runs": 45,
+    "search_candidates": 15,
+    "concept_boxes": 1,
+    "mapping": 182
+  },
+  "new_source_ids": [
+    "LLM_CAND_SOURCE_0001",
+    "LLM_CAND_SOURCE_0002",
+    "LLM_CAND_SOURCE_0003",
+    "LLM_CAND_SOURCE_0004",
+    "LLM_CAND_SOURCE_0005"
+  ],
+  "search_query_count": 29,
+  "direct_inspection_count": 16,
+  "search_run_ids": {
+    "queries": "SR039–SR067",
+    "direct_inspections": "SR068–SR083"
+  },
+  "important_guards": [
+    "No seed files modified",
+    "No approved database writes",
+    "All rows are pending human review",
+    "No Jallow numeric observations emitted",
+    "WENDU NIL retained as source text",
+    "No WENDU age-by-substance inference",
+    "OCIndex scores not interpreted as flows or prevalence",
+    "NDSS/DHS HMIS evidence kept as general system context only"
+  ],
+  "qa_metrics": {
+    "substantive_entity_rows": 113,
+    "substantive_entity_rows_mapped": 113,
+    "substantive_entity_orphan_rate": 0.0,
+    "unique_substantive_source_ids": 7,
+    "unique_substantive_source_ids_orphaned": 0,
+    "unique_source_orphan_rate": 0.0,
+    "all_output_entity_rows_including_logs": 173,
+    "distinct_mapped_entity_keys": 173,
+    "mapping_rows": 182,
+    "layer_a_distinct_substantive_entities": {
+      "A01": 31,
+      "A02": 0,
+      "A03": 0,
+      "A04": 7,
+      "A05": 0,
+      "A06": 0,
+      "A07": 37,
+      "A08": 21,
+      "A09": 0,
+      "A10": 22
+    },
+    "view_b_relationship_counts": {
+      "PROXY": 1,
+      "INCOMPATIBLE": 4,
+      "CONCEPTUALLY_RELATED": 9,
+      "UNKNOWN_REQUIRES_REVIEW": 1
+    },
+    "seed_v2_files_sha256_compared": 15,
+    "seed_v2_files_missing_or_changed": 0,
+    "template_header_checks": "PASS",
+    "candidate_status_checks": "PASS"
+  },
+  "audit_memo": "audit_memo.md"
+}
