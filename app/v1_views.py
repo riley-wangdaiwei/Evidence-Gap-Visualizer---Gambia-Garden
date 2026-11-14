@@ -1329,116 +1329,15 @@ def render_view_a(inventory):
     )
     _fixed_method_content()
 
-    filter_keys = (
-        "v1_filter_search",
-        "v1_filter_parent",
-        "v1_filter_time",
-        "v1_filter_publication",
-        "v1_filter_substance",
-        "v1_filter_age",
-        "v1_filter_geography",
-        "v1_filter_source_type",
-        "v1_filter_access",
-        "v1_filter_review",
-        "v1_filter_box",
-    )
-    if st.button("Show all / reset filters", key="v1_reset_filters"):
-        for key in filter_keys:
-            st.session_state[key] = "" if key.endswith("search") else []
-        st.rerun()
-
     parents, parent_assignments = _source_parent_assignments(inventory)
     mapping_boxes = defaultdict(set)
     for row in _entity_rows(inventory, "mapping"):
         if row.get("source_id") and row.get("operational_box_id"):
             mapping_boxes[row["source_id"]].add(row["operational_box_id"])
-    filter_values = {
-        "parent": parent_axis,
-        "time": TIME_BINS,
-        "publication": sorted(
-            {
-                _value(row, "publication_time", "publication_year")
-                for row in documents
-                if not _is_unknown(_value(row, "publication_time", "publication_year"))
-            }
-        ),
-        "substance": sorted({_value(row, "substance") for row in documents}),
-        "age": sorted({_value(row, "original_age", "original_age_group") for row in documents}),
-        "geography": sorted(
-            {_value(row, "geography_level", "geographic_level") for row in documents}
-        ),
-        "source_type": sorted({_value(row, "source_type", "record_entity_type") for row in documents}),
-        "access": sorted({_value(row, "access_rule", "access_status") for row in documents}),
-        "review": sorted({_value(row, "review_status") for row in documents}),
-        "box": sorted(
-            {
-                box
-                for source_boxes in mapping_boxes.values()
-                for box in source_boxes
-            }
-        ),
-    }
-    with st.expander("Inventory filters · defaults include every record", expanded=True):
-        search = st.text_input("Search sources and metadata", key="v1_filter_search").casefold()
-        filter_columns = st.columns(3)
-        selected = {}
-        for column, (name, label, state_key) in zip(
-            filter_columns * 3,
-            (
-                ("parent", "Layer A parent", "v1_filter_parent"),
-                ("time", "Observation-time bin", "v1_filter_time"),
-                ("publication", "Publication time", "v1_filter_publication"),
-                ("substance", "Substance", "v1_filter_substance"),
-                ("age", "Age / population", "v1_filter_age"),
-                ("geography", "Geography", "v1_filter_geography"),
-                ("source_type", "Source type", "v1_filter_source_type"),
-                ("access", "Access status", "v1_filter_access"),
-                ("review", "Review status", "v1_filter_review"),
-            ),
-        ):
-            selected[name] = column.multiselect(
-                label,
-                filter_values[name],
-                key=state_key,
-                help="Leave empty to include all values.",
-            )
-        selected["box"] = st.multiselect(
-            "Layer B operational box",
-            filter_values["box"],
-            key="v1_filter_box",
-            help="Leave empty to include all operational boxes.",
-        )
-
-    filtered_documents = []
-    for row in documents:
-        source_id = row["source_id"]
-        values = {
-            "parent": set(row["_parents"]),
-            "time": {row["_time_bin"]},
-            "publication": {_value(row, "publication_time", "publication_year")},
-            "substance": {_value(row, "substance")},
-            "age": {_value(row, "original_age", "original_age_group")},
-            "geography": {_value(row, "geography_level", "geographic_level")},
-            "source_type": {_value(row, "source_type", "record_entity_type")},
-            "access": {_value(row, "access_rule", "access_status")},
-            "review": {_value(row, "review_status")},
-            "box": mapping_boxes.get(source_id, set()),
-        }
-        if any(selection and not (selection & values[name]) for name, selection in selected.items()):
-            continue
-        searchable = " ".join(
-            str(value or "")
-            for value in row.values()
-            if not isinstance(value, (list, dict, set))
-        ).casefold()
-        if search and search not in searchable:
-            continue
-        filtered_documents.append(row)
-
-    st.caption(
-        f"Visible after explicit filters: {len(filtered_documents)} / {len(documents)} documents. "
-        "No filter mutates the loaded inventory; reset returns to all records."
-    )
+    filtered_documents = list(documents)
+    selected = {}
+    search = ""
+    st.caption(f"All {len(documents)} documents shown.")
     count_mode = st.selectbox(
         "Heat unit · entity types are never summed together",
         ("Documents", "Data products", "Indicators", "Variables", "Observations"),
