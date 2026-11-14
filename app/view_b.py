@@ -138,18 +138,72 @@ def render(inventory):
             tips.append(f"{parent} / {child}<br>Observation period: {year}<br>Distinct source/data-product units: {count}<br>Inventory records: {len(items)}<br>Click to inspect")
         z.append(values)
         hover.append(tips)
-    fig = go.Figure(go.Heatmap(x=years, y=labels, z=z, text=z, texttemplate="%{text}", hovertext=hover, hovertemplate="%{hovertext}<extra></extra>", colorscale=[[0,"#111922"],[0.25,"#24434A"],[0.6,"#347E78"],[1,"#9AC6A2"]], colorbar={"title":"Distinct<br>source units"}, xgap=2, ygap=2))
-    fig.update_layout(height=max(680, 30 * len(rows) + 140), paper_bgcolor="#050505", plot_bgcolor="#050505", font={"color":"#eeeeee"}, margin={"l":20,"r":20,"t":25,"b":45}, xaxis={"title":"Observation year","side":"bottom","type":"category"}, yaxis={"autorange":"reversed","tickfont":{"size":10}})
+    customdata = [[[row_idx, col_idx] for col_idx in range(len(years))] for row_idx in range(len(rows))]
+    fig = go.Figure(go.Heatmap(x=years, y=labels, z=z, customdata=customdata, text=z, texttemplate="%{text}", hovertext=hover, hovertemplate="%{hovertext}<extra></extra>", colorscale=[[0,"#111922"],[0.25,"#24434A"],[0.6,"#347E78"],[1,"#9AC6A2"]], colorbar={"title":"Distinct<br>source units"}, xgap=2, ygap=2))
+    fig.update_layout(height=max(680, 30 * len(rows) + 140), paper_bgcolor="#050505", plot_bgcolor="#050505", font={"color":"#eeeeee"}, margin={"l":430,"r":30,"t":30,"b":60}, xaxis={"title":"Observation year","side":"bottom","type":"category"}, yaxis={"autorange":"reversed","automargin":True,"tickmode":"array","tickvals":labels,"tickfont":{"size":10},"ticktext":[label.replace("  ›  ", "<br>") for label in labels]})
     event = st.plotly_chart(fig, width="stretch", theme=None, key="v1_research_explorer_heatmap", on_select="rerun", selection_mode="points")
     st.caption(f"{len(visible)} inventory records shown. Publication year is separate and is never treated as observation year. Zero means no matching record is represented in the inventory under these filters; it does not establish that no data exist.")
-    try:
-        point = event.selection.points[-1]
-        idx = labels.index(point.get("y"))
-        parent, child = rows[idx]
-        year = str(point.get("x"))
-        items = cell_records[(parent, child, year)]
-    except (AttributeError, KeyError, TypeError, IndexError, ValueError):
+    detail_cell = None
+    selected_points = getattr(getattr(event, "selection", None), "points", []) or []
+    if selected_points:
+        point = selected_points[-1]
+        row_idx = col_idx = None
+
+        def valid_indices(row_value, col_value):
+            return (
+                isinstance(row_value, int) and not isinstance(row_value, bool)
+                and isinstance(col_value, int) and not isinstance(col_value, bool)
+                and 0 <= row_value < len(rows) and 0 <= col_value < len(years)
+            )
+
+        point_index = point.get("point_index")
+        if isinstance(point_index, (list, tuple)) and len(point_index) >= 2:
+            if valid_indices(point_index[0], point_index[1]):
+                row_idx, col_idx = point_index[0], point_index[1]
+        elif isinstance(point_index, int) and not isinstance(point_index, bool) and len(years):
+            candidate_row, candidate_col = divmod(point_index, len(years))
+            if valid_indices(candidate_row, candidate_col):
+                row_idx, col_idx = candidate_row, candidate_col
+
+        custom = point.get("customdata")
+        if row_idx is None and isinstance(custom, (list, tuple)) and len(custom) >= 2:
+            if valid_indices(custom[0], custom[1]):
+                row_idx, col_idx = custom[0], custom[1]
+
+        if row_idx is None:
+            y_value, x_value = point.get("y"), point.get("x")
+            if isinstance(y_value, str) and y_value in labels:
+                row_idx = labels.index(y_value)
+            elif isinstance(y_value, int) and not isinstance(y_value, bool) and 0 <= y_value < len(rows):
+                row_idx = y_value
+
+            if isinstance(x_value, str) and x_value in years:
+                col_idx = years.index(x_value)
+            elif isinstance(x_value, int) and not isinstance(x_value, bool):
+                year_value = str(x_value)
+                if year_value in years:
+                    col_idx = years.index(year_value)
+                elif 0 <= x_value < len(years):
+                    col_idx = x_value
+
+        if valid_indices(row_idx, col_idx):
+            detail_cell = (row_idx, col_idx)
+        else:
+            st.caption(f"Selection could not be read — use Inspect cell below. Raw point: {point!r}")
+
+    inspect_cols = st.columns([3, 2, 1])
+    inspect_row = inspect_cols[0].selectbox("Subtopic", range(len(labels)), format_func=lambda idx: labels[idx], key="v1_explorer_inspect_subtopic")
+    inspect_col = inspect_cols[1].selectbox("Observation year", range(len(years)), format_func=lambda idx: years[idx], key="v1_explorer_inspect_year")
+    inspect_clicked = inspect_cols[2].button("Inspect cell", key="v1_explorer_inspect_button")
+    if inspect_clicked:
+        detail_cell = (inspect_row, inspect_col)
+
+    if detail_cell is None:
         return
+    row_idx, col_idx = detail_cell
+    parent, child = rows[row_idx]
+    year = years[col_idx]
+    items = cell_records[(parent, child, year)]
     st.markdown(f"### {child} · {year}")
     if not items:
         st.info("No matching inventory record is represented in this cell.")
